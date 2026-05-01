@@ -1,0 +1,949 @@
+\documentclass[11pt]{article}
+
+\usepackage[margin=1in]{geometry}
+\usepackage{amsmath,amssymb,mathtools}
+\usepackage{booktabs,array,longtable}
+\usepackage{enumitem}
+\usepackage{xcolor}
+\usepackage{hyperref}
+\usepackage{listings}
+
+\hypersetup{
+  colorlinks=true,
+  linkcolor=blue,
+  urlcolor=blue,
+  citecolor=blue
+}
+
+\lstset{
+  basicstyle=\ttfamily\small,
+  columns=fullflexible,
+  breaklines=true,
+  frame=single,
+  showstringspaces=false
+}
+
+\newcommand{\Hcal}{\mathcal{H}}
+\newcommand{\Scal}{\mathcal{S}}
+\newcommand{\Acal}{\mathcal{A}}
+\newcommand{\Prb}{\mathbb{P}}
+\setlist[description]{style=nextline,leftmargin=0pt}
+\emergencystretch=2em
+
+\title{Aggregate Documentation Report for \texttt{utils\_jin}}
+\author{STAT 221 Bayesian Poker Project}
+\date{May 1, 2026}
+
+\begin{document}
+\maketitle
+
+\tableofcontents
+\newpage
+
+\section{Purpose and Scope}
+
+The \texttt{utils\_jin/} package is the first complete implementation layer for
+running pre-flop Bayesian range inference and preparing the project for EM. It
+does not replace the original \texttt{utils/} folder. Instead, it wraps and
+extends the existing parser so that the model code has clean, compact objects:
+
+\[
+\begin{aligned}
+\text{PHH sessions}
+&\rightarrow \text{parsed hands}
+\rightarrow \text{decision records} \\
+&\rightarrow \text{state/action encodings}
+\rightarrow \text{pre-flop filtering} \\
+&\rightarrow \text{EM soft counts}.
+\end{aligned}
+\]
+
+The package currently focuses on pre-flop inference. It includes post-flop
+state keys and records because the data extractor already sees all streets, but
+the implemented filter and EM starter are pre-flop only. This is intentional:
+pre-flop filtering is the first working model, and post-flop strength filtering
+should plug into the same record/state infrastructure later.
+
+\section{High-Level Architecture}
+
+\subsection{Main Data Flow}
+
+The current intended data flow is:
+
+\begin{enumerate}[leftmargin=*]
+  \item \texttt{compat.py} makes the legacy \texttt{utils/parse.py} parser importable.
+  \item \texttt{records.py} parses hands and produces one \texttt{DecisionRecord}
+  per player action.
+  \item \texttt{action\_encoder.py} recomputes model-facing action buckets.
+  \item \texttt{state\_encoder.py} maps rich parser states to small discrete
+  \texttt{StateKey} values.
+  \item \texttt{cards.py} provides 1326-combo and 169-class card utilities.
+  \item \texttt{gto\_prior.py} provides a simple heuristic
+  \(p_{\mathrm{GTO}}(a \mid h,s)\).
+  \item \texttt{preflop\_filter.py} updates a range
+  \(R_t(h)\) using Bayesian filtering.
+  \item \texttt{em\_preflop.py} turns filtering posteriors into EM
+  responsibilities and soft counts.
+\end{enumerate}
+
+\subsection{Core Mathematical Objects}
+
+\begin{center}
+\begin{tabular}{lll}
+\toprule
+\textbf{Object} & \textbf{Meaning} & \textbf{Implemented In} \\
+\midrule
+\(h \in \Hcal\) & 169 pre-flop hand class & \texttt{cards.py} \\
+\(s \in \Scal\) & compact public state key & \texttt{state\_encoder.py} \\
+\(a \in \Acal\) & action bucket & \texttt{action\_encoder.py} \\
+\(p_{\mathrm{GTO}}(a\mid h,s)\) & heuristic pre-flop action prior & \texttt{gto\_prior.py} \\
+\(R_t(h)\) & filtered range after action \(t\) & \texttt{preflop\_filter.py} \\
+\(q_m(h)\) & EM responsibility for player-hand \(m\) & \texttt{em\_preflop.py} \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\subsection{Bayesian Filtering Equation}
+
+The pre-flop filter performs the recursive update:
+
+\[
+R_t(h)
+=
+\frac{
+R_{t-1}(h)\,\phi_{h,s_t}[a_t]
+}{
+\sum_{h' \in \Hcal} R_{t-1}(h')\,\phi_{h',s_t}[a_t]
+}.
+\]
+
+In the current implementation,
+\[
+\phi_{h,s}[a] = p_{\mathrm{GTO}}(a \mid h,s),
+\]
+where \(p_{\mathrm{GTO}}\) is a transparent heuristic, not a solver output.
+The interface is designed so that a real solver table can later replace this
+heuristic without rewriting the filter.
+
+\subsection{EM Preparation}
+
+The implemented EM starter uses the filter as the E-step engine. For each
+player-hand group \(m\), it computes:
+
+\[
+q_m(h)
+=
+\Prb(V_m=h \mid a^m_{1:T_m}, s^m_{1:T_m}).
+\]
+
+Then it forms soft counts:
+
+\[
+N_{h,s,a}
+=
+\sum_m
+\sum_{t \in \mathrm{pre}}
+q_m(h)\,
+\mathbf{1}\{s_t^m=s,\ a_t^m=a\}.
+\]
+
+Finally, the M-step helper computes MAP-style action likelihoods:
+
+\[
+\phi_{h,s,a}
+\propto
+N_{h,s,a}
++ \lambda p_{\mathrm{GTO}}(a\mid h,s)
++ \epsilon.
+\]
+
+\section{Package Inventory}
+
+\begin{center}
+\begin{tabular}{lrp{8.3cm}}
+\toprule
+\textbf{File} & \textbf{Lines} & \textbf{Primary Role} \\
+\midrule
+\texttt{\_\_init\_\_.py} & 13 & Package description and namespace marker. \\
+\texttt{compat.py} & 48 & Compatibility wrapper for importing legacy parser modules. \\
+\texttt{cards.py} & 207 & Card normalization, 1326 combos, 169 classes, priors. \\
+\texttt{action\_encoder.py} & 153 & Model-facing action buckets using pre-action context. \\
+\texttt{state\_encoder.py} & 203 & Compact public state keys for filtering and EM. \\
+\texttt{records.py} & 224 & Flat decision-record extraction from parsed hands. \\
+\texttt{gto\_prior.py} & 218 & Simple GTO-inspired pre-flop action prior. \\
+\texttt{preflop\_filter.py} & 124 & Bayesian range filter over 169 classes. \\
+\texttt{em\_preflop.py} & 139 & E-step, soft-count, and M-step helpers. \\
+\texttt{README.md} & 47 & Short usage guide. \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\newpage
+\section{\texttt{\_\_init\_\_.py}}
+
+\subsection{Role}
+
+\texttt{\_\_init\_\_.py} turns \texttt{utils\_jin/} into a Python package and
+documents the purpose of the package. It intentionally contains no runtime
+logic. Its docstring states that the package provides:
+
+\begin{itemize}[leftmargin=*]
+  \item card and combo helpers;
+  \item compact public state encoders;
+  \item a simple GTO-inspired pre-flop action prior;
+  \item a pre-flop Bayesian range filter;
+  \item EM starter functions.
+\end{itemize}
+
+\subsection{Why It Exists}
+
+Keeping \texttt{utils\_jin/} as a package means downstream code can import:
+
+\begin{lstlisting}[language=Python]
+from utils_jin.records import extract_session_records
+from utils_jin.preflop_filter import filter_preflop_records
+\end{lstlisting}
+
+This is cleaner than relying on notebook-relative imports.
+
+\section{\texttt{compat.py}}
+
+\subsection{Problem Solved}
+
+The existing parser in \texttt{utils/parse.py} imports \texttt{hand\_map} and
+\texttt{action\_map} as top-level modules:
+
+\begin{lstlisting}[language=Python]
+from hand_map import poker_hand_mapper
+from action_map import classify
+\end{lstlisting}
+
+That works when a notebook runs from inside \texttt{utils/}, but it is fragile
+when importing from the repository root. \texttt{compat.py} solves this without
+editing legacy code by temporarily adding the old \texttt{utils/} directory to
+\texttt{sys.path}.
+
+\subsection{Functions}
+
+\begin{description}
+  \item[\texttt{repo\_root()}] Returns the repository root based on the location
+  of \texttt{utils\_jin/compat.py}.
+  \item[\texttt{ensure\_legacy\_utils\_path()}] Adds the legacy \texttt{utils/}
+  path to \texttt{sys.path} if needed.
+  \item[\texttt{load\_legacy\_session\_class()}] Imports and returns the original
+  \texttt{Session} class from \texttt{utils/parse.py}.
+  \item[\texttt{load\_legacy\_hand\_mapper()}] Imports and returns the original
+  \texttt{poker\_hand\_mapper}.
+\end{description}
+
+\subsection{Design Note}
+
+This file is a reconciliation layer. It avoids touching the old parser while
+making the new package robust. If the legacy parser is later converted into a
+proper package, this compatibility module can be simplified or removed.
+
+\section{\texttt{cards.py}}
+
+\subsection{Role}
+
+\texttt{cards.py} defines the card universe and the mapping between exact
+two-card combinations and 169 pre-flop classes. It supports both the modeling
+view and the poker view:
+
+\begin{itemize}[leftmargin=*]
+  \item exact combo space: \(\binom{52}{2}=1326\);
+  \item equivalence-class space: 169 classes such as \texttt{AA}, \texttt{AKs},
+  and \texttt{AKo}.
+\end{itemize}
+
+The current pre-flop filter tracks 169 classes. Exact combos are still needed
+for future post-flop blocker-aware mapping.
+
+\subsection{Constants}
+
+\begin{center}
+\begin{tabular}{ll}
+\toprule
+\textbf{Name} & \textbf{Meaning} \\
+\midrule
+\texttt{RANKS\_LOW\_TO\_HIGH} & Rank order from 2 through A. \\
+\texttt{RANKS\_HIGH\_TO\_LOW} & Rank order from A through 2. \\
+\texttt{SUITS} & Suit order \texttt{s}, \texttt{h}, \texttt{d}, \texttt{c}. \\
+\texttt{RANK\_TO\_VALUE} & Rank-to-integer map, A = 14. \\
+\texttt{VALUE\_TO\_RANK} & Inverse map. \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\subsection{Important Functions}
+
+\begin{description}
+  \item[\texttt{normalize\_card(card)}] Standardizes cards to rank-uppercase and
+  suit-lowercase, e.g. \texttt{AS} becomes \texttt{As}.
+  \item[\texttt{split\_cards(cards)}] Converts compact strings such as
+  \texttt{AsKd} into \texttt{["As", "Kd"]}.
+  \item[\texttt{full\_deck()}] Returns all 52 cards in stable order.
+  \item[\texttt{all\_combos()}] Returns all 1326 exact two-card combos.
+  \item[\texttt{combo\_to\_class(combo)}] Maps exact cards to a 169 class.
+  \item[\texttt{all\_169\_classes()}] Returns all 169 pre-flop classes.
+  \item[\texttt{class\_multiplicity(hand\_class)}] Returns 6 for pairs, 4 for
+  suited non-pairs, and 12 for offsuit non-pairs.
+  \item[\texttt{initial\_class\_prior()}] Returns the class prior
+  \(C(h)/1326\).
+  \item[\texttt{legal\_combos(dead\_cards)}] Removes exact combos blocked by
+  board or known cards.
+  \item[\texttt{aggregate\_combo\_probs(combo\_probs)}] Aggregates exact-combo
+  probabilities into 169-class probabilities.
+\end{description}
+
+\subsection{Examples}
+
+\begin{lstlisting}[language=Python]
+from utils_jin.cards import combo_to_class, all_combos, initial_class_prior
+
+combo_to_class("AsKs")  # "AKs"
+combo_to_class("AsKd")  # "AKo"
+combo_to_class("AhAd")  # "AA"
+
+len(all_combos())       # 1326
+sum(initial_class_prior().values())  # 1.0
+\end{lstlisting}
+
+\subsection{Model Connection}
+
+The initial range \(R_0\) is:
+
+\[
+R_0(h)=\frac{C(h)}{1326},
+\qquad
+C(h)=
+\begin{cases}
+6 & \text{pair},\\
+4 & \text{suited non-pair},\\
+12 & \text{offsuit non-pair}.
+\end{cases}
+\]
+
+This is implemented by \texttt{initial\_class\_prior()}.
+
+\section{\texttt{action\_encoder.py}}
+
+\subsection{Role}
+
+\texttt{action\_encoder.py} converts legacy parser action tuples into clean
+model-facing action buckets. The legacy parser already stores an action bucket,
+but it computes bet/raise size using the pot after the action. This script
+recomputes the bucket from the pre-action state, which is more appropriate for
+modeling.
+
+\subsection{Action Buckets}
+
+\begin{center}
+\begin{tabular}{cll}
+\toprule
+\textbf{ID} & \textbf{Constant} & \textbf{Label} \\
+\midrule
+0 & \texttt{FOLD} & \texttt{fold} \\
+1 & \texttt{CHECK\_CALL} & \texttt{check\_call} \\
+2 & \texttt{SMALL\_BET\_RAISE} & \texttt{small\_bet\_raise} \\
+3 & \texttt{MEDIUM\_BET\_RAISE} & \texttt{medium\_bet\_raise} \\
+4 & \texttt{LARGE\_BET\_RAISE} & \texttt{large\_bet\_raise} \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\subsection{Sizing Rule}
+
+The code uses different sizing conventions pre-flop and post-flop:
+
+\begin{itemize}[leftmargin=*]
+  \item \textbf{Pre-flop}: bucket by total raise size in big blinds. This avoids
+  classifying a normal 2.25bb open as ``large'' merely because the blind pot is
+  only 1.5bb.
+  \item \textbf{Post-flop}: bucket by contribution divided by pot before action.
+\end{itemize}
+
+The current pre-flop thresholds are:
+
+\[
+\begin{cases}
+\text{small} & \text{if raise size} \leq 3\text{bb},\\
+\text{medium} & \text{if } 3\text{bb} < \text{raise size} \leq 8\text{bb},\\
+\text{large} & \text{if raise size} > 8\text{bb}.
+\end{cases}
+\]
+
+The current post-flop thresholds are:
+
+\[
+\text{pot fraction}
+=
+\frac{\text{new chips contributed}}{\text{pot before action}},
+\]
+
+\[
+\begin{cases}
+\text{small} & \text{if fraction} < 0.5,\\
+\text{medium} & \text{if } 0.5 \leq \text{fraction} < 1.0,\\
+\text{large} & \text{if fraction} \geq 1.0.
+\end{cases}
+\]
+
+\subsection{Key Data Class}
+
+\texttt{ActionEncoding} stores:
+
+\begin{itemize}[leftmargin=*]
+  \item \texttt{bucket}: model action bucket id;
+  \item \texttt{label}: readable action label;
+  \item \texttt{amount\_to}: total amount committed to on the street;
+  \item \texttt{contribution}: new chips added by the actor;
+  \item \texttt{pot\_fraction}: contribution divided by pot before action;
+  \item \texttt{legacy\_bucket}: original parser bucket.
+\end{itemize}
+
+\subsection{Important Functions}
+
+\begin{description}
+  \item[\texttt{committed\_before\_action(state, hand, street, player)}]
+  Reconstructs how much the player has already committed this street.
+  It handles pre-flop blinds explicitly because blinds are not stored in the
+  betting history.
+  \item[\texttt{encode\_action(state, hand, street, legacy\_action)}]
+  Produces an \texttt{ActionEncoding} from a pre-action state and legacy action.
+\end{description}
+
+\section{\texttt{state\_encoder.py}}
+
+\subsection{Role}
+
+\texttt{state\_encoder.py} compresses the rich parser state into a small
+discrete \texttt{StateKey}. This is essential. EM cannot work if every exact
+betting history is treated as a different state. The state encoder deliberately
+uses coarse buckets.
+
+\subsection{\texttt{StateKey}}
+
+\texttt{StateKey} contains seven fields:
+
+\begin{center}
+\begin{tabular}{ll}
+\toprule
+\textbf{Field} & \textbf{Meaning} \\
+\midrule
+\texttt{street} & pre-flop, flop, turn, or river \\
+\texttt{position} & coarse position bucket \\
+\texttt{active\_players} & heads-up, three-way, or multiway \\
+\texttt{facing\_bet} & whether the player must call a bet \\
+\texttt{raise\_count} & 0, 1, or 2+ raises this street \\
+\texttt{spr} & stack-to-pot ratio bucket \\
+\texttt{board\_texture} & no board, dry, paired, monotone, connected, etc. \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+The string form is:
+
+\begin{lstlisting}
+street|position|active_players|facing_bet|raise_count|spr|board_texture
+\end{lstlisting}
+
+\subsection{Important Functions}
+
+\begin{description}
+  \item[\texttt{position\_bucket(player, num\_players)}] Uses the parser's seat
+  assumptions: \texttt{p1} is small blind and \texttt{p2} is big blind.
+  \item[\texttt{active\_count\_bucket(count)}] Buckets active player count into
+  \texttt{heads\_up}, \texttt{three\_way}, or \texttt{multiway}.
+  \item[\texttt{raise\_count\_bucket(state)}] Reads the parser's street action
+  level and buckets into \texttt{raises\_0}, \texttt{raises\_1}, or
+  \texttt{raises\_2plus}.
+  \item[\texttt{stack\_to\_pot\_bucket(state, player)}] Buckets SPR into
+  \texttt{spr\_low}, \texttt{spr\_mid}, or \texttt{spr\_high}.
+  \item[\texttt{board\_texture\_bucket(board)}] Produces a coarse board texture
+  label.
+  \item[\texttt{current\_bet\_to\_call(state, hand, street)}] Reconstructs the
+  current amount to call before the action.
+  \item[\texttt{facing\_bet\_bucket(state, hand, street, player)}] Compares the
+  current bet to the player's committed amount.
+  \item[\texttt{encode\_state(state, hand, street, player, action\_encoding)}]
+  Returns the final \texttt{StateKey}.
+\end{description}
+
+\subsection{Design Tradeoff}
+
+The current state key is intentionally simple. It should be good enough to begin
+filtering and EM. If the state space is too coarse, the model will miss useful
+strategic context. If it is too detailed, likelihood tables will be sparse and
+EM will become unstable.
+
+\section{\texttt{records.py}}
+
+\subsection{Role}
+
+\texttt{records.py} is the bridge between parsing and modeling. It converts
+nested legacy parser objects into a flat list of \texttt{DecisionRecord} rows.
+Every row corresponds to one player decision.
+
+\subsection{\texttt{DecisionRecord}}
+
+The \texttt{DecisionRecord} data class stores:
+
+\begin{longtable}{lp{10cm}}
+\toprule
+\textbf{Field} & \textbf{Meaning} \\
+\midrule
+\texttt{session\_id} & Source session directory. \\
+\texttt{hand\_id} & Hand id from PHH metadata when available. \\
+\texttt{hand\_index} & Index within parsed session. \\
+\texttt{player\_id} & Acting player, e.g. \texttt{p4}. \\
+\texttt{street} & Street of the decision. \\
+\texttt{decision\_index} & Index within that street. \\
+\texttt{board} & Public board before the action. \\
+\texttt{pot\_before} & Pot before the action. \\
+\texttt{stack\_before} & Acting player's stack before the action. \\
+\texttt{active\_player\_count} & Number of players still active. \\
+\texttt{state\_key} & Structured \texttt{StateKey}. \\
+\texttt{state\_key\_str} & String form of \texttt{StateKey}. \\
+\texttt{action\_bucket} & Model action bucket. \\
+\texttt{action\_label} & Readable action label. \\
+\texttt{amount\_to} & Total amount committed to on current street. \\
+\texttt{contribution} & New chips added by the action. \\
+\texttt{pot\_fraction} & Contribution divided by pot before action. \\
+\texttt{legacy\_action\_bucket} & Original parser action bucket. \\
+\texttt{hole\_cards} & True hole cards when known. \\
+\texttt{hand\_class} & True 169 class when known. \\
+\texttt{strength\_bucket} & True post-flop strength bucket when board exists. \\
+\bottomrule
+\end{longtable}
+
+\subsection{Important Functions}
+
+\begin{description}
+  \item[\texttt{iter\_hand\_decision\_records(hand, session\_id, hand\_index)}]
+  Yields records from one parsed hand.
+  \item[\texttt{extract\_session\_records(session\_path)}] Parses one session
+  directory and returns all decision records.
+  \item[\texttt{extract\_many\_session\_records(root\_path)}] Extracts records
+  from every session under a root directory.
+  \item[\texttt{group\_records\_by\_player\_hand(records)}] Groups rows by
+  \((\text{session}, \text{hand}, \text{player})\).
+  \item[\texttt{preflop\_only(records)}] Filters records to pre-flop actions.
+\end{description}
+
+\subsection{Why This Is Necessary}
+
+The parser stores actions and states separately:
+
+\begin{lstlisting}[language=Python]
+hand.states[street][t]
+hand.actions[street][t]
+\end{lstlisting}
+
+The model needs them joined. \texttt{records.py} performs that join and adds the
+model encodings. This is the most important infrastructure layer for starting
+EM.
+
+\section{\texttt{gto\_prior.py}}
+
+\subsection{Role}
+
+\texttt{gto\_prior.py} implements a simple, transparent approximation to
+\[
+p_{\mathrm{GTO}}(a \mid h,s).
+\]
+
+It is not a real solver output. Its purpose is to provide a reasonable
+pre-flop action likelihood interface so filtering can start immediately. Later,
+the same interface can be backed by actual solver frequencies or a better
+pre-flop chart.
+
+\subsection{Action Probability Interface}
+
+The main class is \texttt{PreflopGTOPrior}. Its most important method is:
+
+\begin{lstlisting}[language=Python]
+action_probs(hand_class, state_key) -> dict[int, float]
+\end{lstlisting}
+
+It returns probabilities over all five action buckets.
+
+\subsection{Hand Features}
+
+\texttt{HandClassFeatures} stores:
+
+\begin{itemize}[leftmargin=*]
+  \item high rank;
+  \item low rank;
+  \item pair indicator;
+  \item suited indicator;
+  \item rank gap;
+  \item number of broadway cards;
+  \item ace indicator;
+  \item scalar heuristic strength.
+\end{itemize}
+
+The helper \texttt{hand\_class\_features(hand\_class)} computes these features.
+
+\subsection{Heuristic Logic}
+
+The prior uses:
+
+\begin{itemize}[leftmargin=*]
+  \item intrinsic hand strength;
+  \item position adjustment;
+  \item multiway penalty;
+  \item prior raise-count penalty;
+  \item premium-hand boost;
+  \item speculative suited/connected boost.
+\end{itemize}
+
+It then builds action scores and applies a softmax. A small probability floor is
+mixed into every action. That floor is important: if an action has probability
+zero, Bayesian filtering would permanently eliminate some hands.
+
+\subsection{Theta Connection}
+
+This module does not yet implement a learned \(\theta\). However, it is the
+natural place where the current model's GTO perturbation will enter. The future
+version can use:
+
+\[
+\phi_{h,s,\theta}[a]
+\propto
+p_{\mathrm{GTO}}(a\mid h,s)
+\exp\{u_\theta(h,s,a)\}.
+\]
+
+Currently, \texttt{aggression} and \texttt{tightness} are simple manual knobs,
+not learned latent variables.
+
+\subsection{EM Prior Counts}
+
+\texttt{dirichlet\_alpha(hand\_class, state\_key, kappa)} returns:
+
+\[
+\alpha_{h,s,a}
+=
+\kappa p_{\mathrm{GTO}}(a\mid h,s).
+\]
+
+These pseudo-counts are used by \texttt{em\_preflop.py} in the M-step helper.
+
+\section{\texttt{preflop\_filter.py}}
+
+\subsection{Role}
+
+\texttt{preflop\_filter.py} implements Bayesian range filtering over 169
+pre-flop classes.
+
+\subsection{Classes}
+
+\begin{description}
+  \item[\texttt{FilterStep}] Debug record for one update. It stores the state
+  key, observed action, evidence, ESS, top class, and top probability.
+  \item[\texttt{PreflopRangeFilter}] Maintains and updates the current range
+  \(R_t(h)\).
+\end{description}
+
+\subsection{Update}
+
+\texttt{PreflopRangeFilter.update(state\_key, action\_bucket)} performs:
+
+\[
+\widetilde{R}_t(h)
+=
+R_{t-1}(h)
+\phi_{h,s_t}[a_t],
+\]
+
+\[
+R_t(h)
+=
+\frac{\widetilde{R}_t(h)}
+{\sum_{h'} \widetilde{R}_t(h')}.
+\]
+
+The denominator is stored as \texttt{evidence}; it is the predictive
+probability of the observed action under the current range and prior model.
+
+\subsection{Effective Sample Size}
+
+\texttt{effective\_sample\_size(distribution)} computes:
+
+\[
+\mathrm{ESS}(R)
+=
+\frac{1}{\sum_h R(h)^2}.
+\]
+
+ESS is a concentration diagnostic. A uniform range over 169 classes has ESS
+169. A highly concentrated range has lower ESS.
+
+\subsection{Convenience Functions}
+
+\begin{description}
+  \item[\texttt{filter\_preflop\_records(records)}] Runs the filter over one
+  grouped player-hand record sequence.
+  \item[\texttt{uniform\_class\_distribution()}] Returns a uniform distribution
+  over 169 classes for sensitivity checks.
+\end{description}
+
+\section{\texttt{em\_preflop.py}}
+
+\subsection{Role}
+
+\texttt{em\_preflop.py} provides the starter pieces needed for pre-flop EM. It
+does not run a full multi-iteration training loop yet. Instead, it exposes the
+core mathematical operations separately so they can be inspected and tested.
+
+\subsection{E-Step}
+
+\texttt{e\_step\_preflop(records, prior\_model)} groups records by
+\((\text{session}, \text{hand}, \text{player})\), runs the pre-flop filter on
+each group, and returns:
+
+\[
+q_m(h)
+=
+\Prb(V_m=h \mid a^m_{1:T_m},s^m_{1:T_m}).
+\]
+
+In code, the result is:
+
+\begin{lstlisting}[language=Python]
+dict[(session_id, hand_id, player_id), dict[hand_class, probability]]
+\end{lstlisting}
+
+\subsection{Soft Counts}
+
+\texttt{expected\_action\_counts(records, responsibilities)} computes:
+
+\[
+N_{h,s,a}
+=
+\sum_m
+\sum_t
+q_m(h)\mathbf{1}\{s_t=s,\ a_t=a\}.
+\]
+
+This is the central EM bridge: true hand labels are replaced by posterior
+responsibilities.
+
+\subsection{M-Step Helper}
+
+\texttt{m\_step\_likelihoods(counts, prior\_model, kappa, smoothing)} computes:
+
+\[
+\phi_{h,s,a}
+=
+\frac{
+N_{h,s,a}
++ \kappa p_{\mathrm{GTO}}(a\mid h,s)
++ \epsilon
+}{
+\sum_{a'}
+\left[
+N_{h,s,a'}
++ \kappa p_{\mathrm{GTO}}(a'\mid h,s)
++ \epsilon
+\right]
+}.
+\]
+
+\texttt{kappa} controls how strongly the GTO-inspired prior affects the learned
+likelihood. \texttt{smoothing} is additional nonzero mass for numerical
+stability.
+
+\subsection{Evaluation Helper}
+
+\texttt{true\_class\_log\_loss(records, responsibilities)} computes average:
+
+\[
+-\log q_m(h_m^\star),
+\]
+
+where \(h_m^\star\) is the true hand class from Pluribus. This metric is only
+available because Pluribus reveals hole cards.
+
+\subsection{What Is Still Missing for Full EM}
+
+To run full EM, we still need:
+
+\begin{itemize}[leftmargin=*]
+  \item an iterative training loop;
+  \item train/validation splits;
+  \item model serialization;
+  \item a learned likelihood class that can replace \texttt{PreflopGTOPrior}
+  inside the filter after each M-step;
+  \item convergence monitoring based on held-out action log-loss or true-class
+  log-loss.
+\end{itemize}
+
+\section{\texttt{README.md}}
+
+\subsection{Role}
+
+\texttt{README.md} is a short usage guide. It lists the package modules and
+shows two examples:
+
+\begin{enumerate}[leftmargin=*]
+  \item extracting records and filtering one player-hand;
+  \item running the EM starter functions.
+\end{enumerate}
+
+\subsection{Minimal Filtering Example}
+
+\begin{lstlisting}[language=Python]
+from utils_jin.records import extract_session_records, group_records_by_player_hand
+from utils_jin.preflop_filter import filter_preflop_records
+
+records = extract_session_records("pluribus/78", include_postflop=False)
+groups = group_records_by_player_hand(records)
+
+key, one_player_hand = next(iter(groups.items()))
+filt = filter_preflop_records(one_player_hand)
+
+print(key)
+print(filt.top_k(10))
+print(filt.steps[-1])
+\end{lstlisting}
+
+\subsection{Minimal EM Starter Example}
+
+\begin{lstlisting}[language=Python]
+from utils_jin.em_preflop import (
+    e_step_preflop,
+    expected_action_counts,
+    m_step_likelihoods,
+)
+
+q = e_step_preflop(records)
+counts = expected_action_counts(records, q)
+phi = m_step_likelihoods(counts)
+\end{lstlisting}
+
+\section{Current Smoke-Test Results}
+
+The implementation was smoke-tested on the Pluribus data. Full pre-flop
+extraction produced:
+
+\begin{center}
+\begin{tabular}{lr}
+\toprule
+\textbf{Quantity} & \textbf{Value} \\
+\midrule
+Pre-flop decision records & 61{,}700 \\
+Distinct compact pre-flop states & 76 \\
+Known hand-class labels & 61{,}700 \\
+Exact combos generated & 1{,}326 \\
+Pre-flop classes generated & 169 \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+The action bucket distribution after re-bucketing was:
+
+\begin{center}
+\begin{tabular}{lr}
+\toprule
+\textbf{Bucket} & \textbf{Count} \\
+\midrule
+0: fold & 44{,}077 \\
+1: check/call & 6{,}777 \\
+2: small bet/raise & 8{,}293 \\
+3: medium bet/raise & 966 \\
+4: large bet/raise & 1{,}587 \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+This confirms that all five model action buckets are currently represented.
+
+\section{How the Scripts Fit Together}
+
+\subsection{Filtering Workflow}
+
+\begin{lstlisting}[language=Python]
+from utils_jin.records import extract_session_records, group_records_by_player_hand
+from utils_jin.preflop_filter import filter_preflop_records
+
+records = extract_session_records("pluribus/78", include_postflop=False)
+groups = group_records_by_player_hand(records)
+
+for key, group in groups.items():
+    filt = filter_preflop_records(group)
+    posterior = filt.range
+\end{lstlisting}
+
+This workflow uses:
+
+\begin{itemize}[leftmargin=*]
+  \item \texttt{compat.py} indirectly through \texttt{records.py};
+  \item \texttt{records.py} for extraction;
+  \item \texttt{action\_encoder.py} and \texttt{state\_encoder.py} inside
+  extraction;
+  \item \texttt{cards.py} for true class labels and initial prior;
+  \item \texttt{gto\_prior.py} for action likelihoods;
+  \item \texttt{preflop\_filter.py} for posterior updates.
+\end{itemize}
+
+\subsection{EM Starter Workflow}
+
+\begin{lstlisting}[language=Python]
+from utils_jin.em_preflop import (
+    e_step_preflop,
+    expected_action_counts,
+    m_step_likelihoods,
+    true_class_log_loss,
+)
+
+q = e_step_preflop(records)
+counts = expected_action_counts(records, q)
+phi = m_step_likelihoods(counts)
+loss = true_class_log_loss(records, q)
+\end{lstlisting}
+
+This workflow computes one EM-style E-step and one M-step table. It does not yet
+loop until convergence.
+
+\section{Recommended Next Engineering Steps}
+
+\begin{enumerate}[leftmargin=*]
+  \item Add a train/test split utility for Pluribus sessions.
+  \item Add a likelihood model class that stores learned \(\phi_{h,s,a}\)
+  tables and implements the same action-probability interface as
+  \texttt{PreflopGTOPrior}.
+  \item Implement an actual EM loop:
+  \[
+  \text{E-step} \rightarrow \text{soft counts} \rightarrow \text{M-step}
+  \rightarrow \text{evaluate} \rightarrow \text{repeat}.
+  \]
+  \item Add held-out action log-loss and true-class log-loss metrics.
+  \item Implement the post-flop range-to-strength mapper:
+  \[
+  R(h) + \text{board} \rightarrow Q(w).
+  \]
+  \item Add a post-flop strength filter using \(\psi_{w,s,a}\).
+  \item Add learned \(\theta\) only after the baseline EM loop works.
+\end{enumerate}
+
+\section{Summary}
+
+\texttt{utils\_jin/} now contains the complete utility layer needed to begin
+pre-flop filtering and to start implementing EM. The most important design
+achievement is separation of concerns:
+
+\begin{itemize}[leftmargin=*]
+  \item parser compatibility is isolated in \texttt{compat.py};
+  \item raw poker data is flattened in \texttt{records.py};
+  \item model state/action spaces are controlled by encoders;
+  \item GTO-inspired priors are isolated behind a replaceable interface;
+  \item filtering is independent of extraction;
+  \item EM utilities are built on top of filtering outputs.
+\end{itemize}
+
+This structure lets the project improve one layer at a time without rewriting
+the entire pipeline.
+
+\end{document}
