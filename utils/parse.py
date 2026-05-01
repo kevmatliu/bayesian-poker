@@ -3,6 +3,8 @@ import os
 
 from pokerkit import HandHistory
 
+from hand_map import poker_hand_mapper
+from action_map import classify
 
 class State:
     def __init__(
@@ -12,7 +14,8 @@ class State:
         player_to_act,
         players_in_hand,
         current_stacks,
-        pot_size
+        pot_size,
+        hand_strength_map,
     ):
         self.community_cards = community_cards
         self.betting_history = betting_history
@@ -20,6 +23,7 @@ class State:
         self.players_in_hand = players_in_hand
         self.current_stacks = current_stacks
         self.pot_size = pot_size
+        self.hand_strength_map = hand_strength_map
 
     def __repr__(self):
         return (
@@ -28,9 +32,9 @@ class State:
             f"player_to_act={self.player_to_act}, \n"
             f"players_in_hand={self.players_in_hand}, \n"
             f"current_stacks={self.current_stacks}, \n"
-            f"pot_size={self.pot_size})\n"
+            f"pot_size={self.pot_size}, \n"
+            f"hand_strength_map={self.hand_strength_map})\n"
         )
-
 
 class Hand:
     STREETS = ['pre-flop', 'flop', 'turn', 'river']
@@ -43,6 +47,9 @@ class Hand:
 
         self._num_players = len(hand_history.players)
         self.player_names = hand_history.players
+        self.hand_strength_map = {
+            f'p{i + 1}': {} for i in range(self._num_players)
+        }
 
         self.hole_cards = {
             f'p{i + 1}': '' for i in range(self._num_players)
@@ -94,6 +101,8 @@ class Hand:
             'river': 0,
         }
 
+        self._street_action_level = 0
+
         self._initialized = False
     
     def __repr__(self):
@@ -133,6 +142,26 @@ class Hand:
                 return p
         return None
 
+    def _active_hand_strength_map(self):
+        """
+        Return current hand strength only for players still in the hand.
+        Preflop or missing hole cards -> None.
+        """
+        active_strengths = {}
+
+        for p in self._player_ids():
+            if not self._players_in_hand[p]:
+                continue
+
+            hole = self.hole_cards[p]
+            if not hole or not self._community_cards:
+                active_strengths[p] = None
+                continue
+
+            active_strengths[p] = poker_hand_mapper(hole, self._community_cards)
+
+        return active_strengths
+
     def _append_state(self, player_to_act):
         self.states[self._street].append(State(
             community_cards=self._community_cards,
@@ -141,6 +170,7 @@ class Hand:
             players_in_hand=self._players_in_hand_list(),
             current_stacks=self.stacks.copy(),
             pot_size=self._pot,
+            hand_strength_map=self._active_hand_strength_map(),
         ))
 
     def _reset_round_state_for_new_street(self):
@@ -149,6 +179,7 @@ class Hand:
             f'p{i + 1}': 0 for i in range(self._num_players)
         }
         self._betting_history_this_street = []
+        self._street_action_level = 0
 
     def _post_blinds(self):
         # Only once, at hand initialization
@@ -219,7 +250,9 @@ class Hand:
             self._community_cards += new_cards
             self._reset_round_state_for_new_street()
 
+            self.hand_strength_map = self._active_hand_strength_map()
             self._append_state(player_to_act=self._first_to_act_postflop())
+
             return
 
         player = parts[0]   # player actions
@@ -260,16 +293,21 @@ class Hand:
             self._pot += contribution
             self._validate_nonnegative_stack(player)
 
+            self._street_action_level += 1
+
         elif action_type == 'sm':
             return
 
         else:
             raise ValueError(f"Unknown action type: {action_type}")
+        
 
-        self._betting_history_this_street.append((player, action_type, amount))
+        action_bucket = classify(action_type, self._pot, bet=amount)
+
+        self._betting_history_this_street.append((player, (action_bucket, self._street_action_level), amount))
 
         t = self._street_action_index[self._street]
-        self.actions[self._street][t] = (player, action_type, amount)
+        self.actions[self._street][t] = (player, (action_bucket, self._street_action_level), amount)
         self._street_action_index[self._street] += 1
 
         next_to_act = self.next_player(player)
