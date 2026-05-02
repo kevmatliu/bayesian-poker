@@ -15,9 +15,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from .cards import all_169_classes, initial_class_prior, normalize_distribution
+from ..utils_jin.cards import all_169_classes, initial_class_prior, normalize_distribution
 from .gto_prior import PreflopGTOPrior
-from .state_encoder import StateKey
+from ..utils_jin.state_encoder import StateKey
 
 
 @dataclass(frozen=True)

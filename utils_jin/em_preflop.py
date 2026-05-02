@@ -19,7 +19,7 @@ from typing import Iterable
 
 from .action_encoder import ACTION_LABELS
 from .cards import all_169_classes
-from .gto_prior import ACTION_BUCKETS, PreflopGTOPrior
+from ..utils.gto_prior import ACTION_BUCKETS, PreflopGTOPrior
 from .preflop_filter import filter_preflop_records
 from .records import DecisionRecord, group_records_by_player_hand, preflop_only
 

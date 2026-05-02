@@ -15,15 +15,15 @@ from __future__ import annotations
 from dataclasses import dataclass
 from math import exp
 
-from .action_encoder import (
+from ..utils_jin.action_encoder import (
     CHECK_CALL,
     FOLD,
     LARGE_BET_RAISE,
     MEDIUM_BET_RAISE,
     SMALL_BET_RAISE,
 )
-from .cards import RANK_TO_VALUE, all_169_classes
-from .state_encoder import StateKey
+from ..utils_jin.cards import RANK_TO_VALUE, all_169_classes
+from ..utils_jin.state_encoder import StateKey
 
 ACTION_BUCKETS = (FOLD, CHECK_CALL, SMALL_BET_RAISE, MEDIUM_BET_RAISE, LARGE_BET_RAISE)
 

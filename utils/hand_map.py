@@ -21,6 +21,40 @@ class Card:
     @property
     def value(self) -> int:
         return RANK_TO_VALUE[self.rank]
+    
+
+def get_equivalence_class(cards: List[Card]) -> str:
+    """
+    Mapping 2-card hand to equivalence class
+    """
+    if len(cards) != 2:
+        raise ValueError("Equivalence classes are only defined for 2-card hands.")
+
+    c1, c2 = sorted(cards, key=lambda c: c.value, reverse=True)
+    suited = c1.suit == c2.suit
+    rank1 = VALUE_TO_RANK[c1.value]
+    rank2 = VALUE_TO_RANK[c2.value]
+
+    if rank1 == rank2:
+        return f"{rank1}{rank2}"
+    elif suited:
+        return f"{rank1}{rank2}s"
+    else:
+        return f"{rank1}{rank2}o"
+    
+def all_169_classes() -> List[str]:
+    ranks = "AKQJT98765432"
+    classes = []
+    for i in range(len(ranks)):
+        for j in range(i, len(ranks)):
+            r1, r2 = ranks[i], ranks[j]
+            if i == j:
+                classes.append(f"{r1}{r2}")
+            else:
+                classes.append(f"{r1}{r2}s")
+                classes.append(f"{r1}{r2}o")
+
+    return classes
 
 
 def parse_card(card: str) -> Card:
@@ -322,6 +356,17 @@ def cards_str_to_list(cards_str: str) -> List[str]:
 
 
 def poker_hand_mapper(hole_cards, board_cards) -> dict:
+    """
+    Buckets:
+    - nuts/near-nuts
+    - strong made
+    - medium made
+    - weak made
+    - strong draw
+    - weak draw
+    - air
+    """
+
     if isinstance(hole_cards, str):
         hole_cards = cards_str_to_list(hole_cards)
     if isinstance(board_cards, str):

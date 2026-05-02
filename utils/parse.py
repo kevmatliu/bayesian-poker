@@ -1,9 +1,10 @@
-from pathlib import Path
 import os
+import numpy as np
 
+from pathlib import Path
 from pokerkit import HandHistory
 
-from hand_map import poker_hand_mapper
+from hand_map import Card, poker_hand_mapper, get_equivalence_class
 from action_map import classify
 
 class State:
@@ -42,29 +43,48 @@ class Hand:
     def __init__(self, hand_history):
         self.hand_history = hand_history
 
+        # poker parameters
         self._bb = hand_history.blinds_or_straddles[1]
         self._sb = hand_history.blinds_or_straddles[0]
 
+        # players
         self._num_players = len(hand_history.players)
         self.player_names = hand_history.players
+
+        # hand strength maps and hole cards by player
         self.hand_strength_map = {
-            f'p{i + 1}': {} for i in range(self._num_players)
+            f'p{i + 1}': {} for i in range(self._num_players)   # player --> {'bucket', 'score', 'hand_type', 'outs', 'board_texture'}
         }
-
         self.hole_cards = {
-            f'p{i + 1}': '' for i in range(self._num_players)
+            f'p{i + 1}': '' for i in range(self._num_players)   # player --> 'AhKh' format
+        }
+        self.hole_cards_class = {
+            f'p{i + 1}': '' for i in range(self._num_players)   # player --> 'AKs', 'AQo', etc. format
         }
 
-        self.player_positions = {
+        # probability vectors
+        self.hand_range = {                                     # player1 --> player2 --> 169-dim vector of hand frequencies on player2 from player1 perspective
+            f'p{i + 1}': {
+                f'p{j + 1}': np.zeros(169) for j in range(self._num_players) if j != i
+            } for i in range(self._num_players)
+        }
+        self.hand_strength = {                                  # player1 --> player2 --> 7-dim vector of hand strength scores on player2 from player1 perspective
+            f'p{i + 1}': {                                      # buckets of nuts/near-nuts, strong made, medium made, weak made, strong draw, weak draw, air
+                f'p{j + 1}': np.zeros(7) for j in range(self._num_players) if j != i
+            } for i in range(self._num_players)
+        }
+
+        # more params
+        self.player_positions = {                               # player positions at the table 
             f'p{i + 1}': self.player_names[i] for i in range(self._num_players)
         }
 
-        self.starting_stacks = {
+        self.starting_stacks = {                                # player starting stacks
             f'p{i + 1}': hand_history.starting_stacks[i]
             for i in range(self._num_players)
         }
 
-        self.stacks = self.starting_stacks.copy()
+        self.stacks = self.starting_stacks.copy()               # player current stacks, updated after each action
 
         self.states = {
             'pre-flop': [],
