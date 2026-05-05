@@ -4,12 +4,13 @@ import numpy as np
 from pathlib import Path
 from pokerkit import HandHistory
 
-from hand_map import Card, poker_hand_mapper, get_equivalence_class
-from action_map import classify
+from utils.hand_map import Card, all_169_classes, get_equivalence_class, poker_hand_mapper
+from utils.action_map import classify
 
 class State:
     def __init__(
         self,
+        player_order,
         community_cards,
         betting_history,
         player_to_act,
@@ -18,6 +19,7 @@ class State:
         pot_size,
         hand_strength_map,
     ):
+        self.player_order = player_order
         self.community_cards = community_cards
         self.betting_history = betting_history
         self.player_to_act = player_to_act
@@ -28,6 +30,7 @@ class State:
 
     def __repr__(self):
         return (
+            f"State(player_order={self.player_order}, \n"
             f"State(community_cards={self.community_cards}, \n"
             f"betting_history={self.betting_history}, \n"
             f"player_to_act={self.player_to_act}, \n"
@@ -49,38 +52,45 @@ class Hand:
 
         # players
         self._num_players = len(hand_history.players)
-        self.player_names = hand_history.players
+        self.player_names = list(hand_history.players)
+        self.player_order = list(self.player_names)
+        self.seat_to_player = {
+            f'p{i + 1}': self.player_names[i] for i in range(self._num_players)
+        }
+        self.player_to_seat = {
+            player: seat for seat, player in self.seat_to_player.items()
+        }
 
         # hand strength maps and hole cards by player
         self.hand_strength_map = {
-            f'p{i + 1}': {} for i in range(self._num_players)   # player --> {'bucket', 'score', 'hand_type', 'outs', 'board_texture'}
+            player: {} for player in self.player_names   # player --> {'bucket', 'score', 'hand_type', 'outs', 'board_texture'}
         }
         self.hole_cards = {
-            f'p{i + 1}': '' for i in range(self._num_players)   # player --> 'AhKh' format
+            player: '' for player in self.player_names   # player --> 'AhKh' format
         }
         self.hole_cards_class = {
-            f'p{i + 1}': '' for i in range(self._num_players)   # player --> 'AKs', 'AQo', etc. format
+            player: '' for player in self.player_names   # player --> 'AKs', 'AQo', etc. format
         }
 
         # probability vectors
         self.hand_range = {                                     # player1 --> player2 --> 169-dim vector of hand frequencies on player2 from player1 perspective
-            f'p{i + 1}': {
-                f'p{j + 1}': np.zeros(169) for j in range(self._num_players) if j != i
-            } for i in range(self._num_players)
+            player_i: {
+                player_j: np.zeros(169) for player_j in self.player_names if player_j != player_i
+            } for player_i in self.player_names
         }
         self.hand_strength = {                                  # player1 --> player2 --> 7-dim vector of hand strength scores on player2 from player1 perspective
-            f'p{i + 1}': {                                      # buckets of nuts/near-nuts, strong made, medium made, weak made, strong draw, weak draw, air
-                f'p{j + 1}': np.zeros(7) for j in range(self._num_players) if j != i
-            } for i in range(self._num_players)
+            player_i: {                                      # buckets of nuts/near-nuts, strong made, medium made, weak made, strong draw, weak draw, air
+                player_j: np.zeros(7) for player_j in self.player_names if player_j != player_i
+            } for player_i in self.player_names
         }
 
         # more params
         self.player_positions = {                               # player positions at the table 
-            f'p{i + 1}': self.player_names[i] for i in range(self._num_players)
+            player: self._position_name(player) for player in self.player_names
         }
 
         self.starting_stacks = {                                # player starting stacks
-            f'p{i + 1}': hand_history.starting_stacks[i]
+            self.player_names[i]: hand_history.starting_stacks[i]
             for i in range(self._num_players)
         }
 
@@ -101,7 +111,7 @@ class Hand:
         }
 
         self._players_in_hand = {
-            f'p{i + 1}': True for i in range(self._num_players)
+            player: True for player in self.player_names
         }
 
         self._street = 'pre-flop'
@@ -110,7 +120,7 @@ class Hand:
 
         self._current_bet = 0              # current amount to call on this street
         self._money_in_round = {
-            f'p{i + 1}': 0 for i in range(self._num_players)
+            player: 0 for player in self.player_names
         }
         self._betting_history_this_street = []
 
@@ -134,27 +144,78 @@ class Hand:
             f"actions={self.actions})\n"
         )
 
+    @classmethod
+    def from_hand_history(cls, hand_history):
+        hand = cls(hand_history)
+        hand.parse()
+        return hand
+
+    @classmethod
+    def from_string(cls, hand_history_text: str):
+        hand_history = HandHistory.loads(hand_history_text)
+        return cls.from_hand_history(hand_history)
+
+    @classmethod
+    def from_file(cls, file_path):
+        with Path(file_path).expanduser().resolve().open("rb") as file_obj:
+            hand_history = HandHistory.load(file_obj)
+        return cls.from_hand_history(hand_history)
+
 
     def _player_ids(self):
-        return [f'p{i + 1}' for i in range(self._num_players)]
+        return list(self.player_names)
+
+    def _player_name_from_token(self, player_token):
+        return self.seat_to_player.get(player_token, player_token)
+
+    def _position_name(self, player):
+        idx = self.player_names.index(player)
+        if idx == 0:
+            return 'sb'
+        if idx == 1:
+            return 'bb'
+        position_map = {
+            3: 'button',
+            4: ['utg', 'button'],
+            5: ['utg', 'co', 'button'],
+            6: ['utg', 'hj', 'co', 'button'],
+        }
+        remaining = position_map.get(self._num_players, [])
+        return remaining[idx - 2] if idx - 2 < len(remaining) else f'seat_{idx + 1}'
 
     def _players_in_hand_list(self):
         return [(p, self._players_in_hand[p]) for p in self._player_ids()]
 
+    def set_hand_range_vector(self, observer: str, target: str, class_distribution: dict[str, float]) -> np.ndarray:
+        if observer == target:
+            raise ValueError("Observer and target must be different players.")
+        if observer not in self.hand_range:
+            raise KeyError(f"Unknown observer {observer!r}.")
+        if target not in self.hand_range[observer]:
+            raise KeyError(f"Unknown target {target!r} for observer {observer!r}.")
+
+        classes = all_169_classes()
+        vector = np.array([class_distribution.get(hand_class, 0.0) for hand_class in classes], dtype=float)
+        total = vector.sum()
+        if total > 0:
+            vector = vector / total
+        self.hand_range[observer][target] = vector
+        return vector
+
     def next_player(self, curr_player):
-        idx = int(curr_player[1:]) - 1
+        idx = self.player_names.index(curr_player)
         for i in range(1, self._num_players + 1):
             next_idx = (idx + i) % self._num_players
-            p = f'p{next_idx + 1}'
+            p = self.player_names[next_idx]
             if self._players_in_hand[p]:
                 return p
         return None
 
     def _first_to_act_preflop(self):
-        # Assumes p1=SB, p2=BB, action starts left of BB
+        # Assumes seat order is SB, BB, then clockwise.
         if self._num_players == 2:
-            return 'p1'
-        return 'p3'
+            return self.player_names[0]
+        return self.player_names[2]
 
     def _first_to_act_postflop(self):
         for p in self._player_ids():
@@ -184,6 +245,7 @@ class Hand:
 
     def _append_state(self, player_to_act):
         self.states[self._street].append(State(
+            player_order=self.player_order.copy(),
             community_cards=self._community_cards,
             betting_history=self._betting_history_this_street.copy(),
             player_to_act=player_to_act,
@@ -196,7 +258,7 @@ class Hand:
     def _reset_round_state_for_new_street(self):
         self._current_bet = 0
         self._money_in_round = {
-            f'p{i + 1}': 0 for i in range(self._num_players)
+            player: 0 for player in self.player_names
         }
         self._betting_history_this_street = []
         self._street_action_level = 0
@@ -204,13 +266,15 @@ class Hand:
     def _post_blinds(self):
         # Only once, at hand initialization
         if self._num_players >= 1:
-            self.stacks['p1'] -= self._sb
-            self._money_in_round['p1'] = self._sb
+            sb_player = self.player_names[0]
+            self.stacks[sb_player] -= self._sb
+            self._money_in_round[sb_player] = self._sb
             self._pot += self._sb
 
         if self._num_players >= 2:
-            self.stacks['p2'] -= self._bb
-            self._money_in_round['p2'] = self._bb
+            bb_player = self.player_names[1]
+            self.stacks[bb_player] -= self._bb
+            self._money_in_round[bb_player] = self._bb
             self._pot += self._bb
 
         self._current_bet = self._bb
@@ -239,7 +303,7 @@ class Hand:
         self._community_cards = ''
         self._pot = 0
         self._players_in_hand = {
-            f'p{i + 1}': True for i in range(self._num_players)
+            player: True for player in self.player_names
         }
 
         self._reset_round_state_for_new_street()
@@ -254,7 +318,7 @@ class Hand:
         parts = raw_action.split()
 
         if parts[0] == 'd' and parts[1] == 'dh':    # hole cards
-            player = parts[2]
+            player = self._player_name_from_token(parts[2])
             cards = parts[3]
             self.hole_cards[player] = cards
             return
@@ -275,7 +339,7 @@ class Hand:
 
             return
 
-        player = parts[0]   # player actions
+        player = self._player_name_from_token(parts[0])   # player actions
         action_type = parts[1]
 
         if not self._players_in_hand[player]:
@@ -370,10 +434,10 @@ class Session:
         )
 
         for path in files:
-            with path.open('rb') as f:
-                hh = HandHistory.load(f)
-                hand = Hand(hh)
-                hand.parse()
-                self.hands.append(hand)
+            self.hands.append(Hand.from_file(path))
 
         return self.hands
+
+
+def parse_single_hand(hand_history_text: str) -> Hand:
+    return Hand.from_string(hand_history_text)
