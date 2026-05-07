@@ -4,7 +4,9 @@ import numpy as np
 from pathlib import Path
 from pokerkit import HandHistory
 
-from utils.hand_map import Card, all_169_classes, get_equivalence_class, poker_hand_mapper
+from utils.strength.common import Card
+from utils.strength.postflop import poker_hand_mapper
+from utils.strength.preflop import all_169_classes, get_equivalence_class
 from utils.action_map import classify
 
 class State:

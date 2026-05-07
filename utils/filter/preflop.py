@@ -1,3 +1,5 @@
+"""Preflop Bayesian filter over 169 strategic hand classes."""
+
 from __future__ import annotations
 
 import math
@@ -11,8 +13,8 @@ from utils.filter.helpers import (
     normalize,
     sample_combo_for_class,
 )
-from utils.gto_prior import GTOPrior, StateKey
-from utils.hand_map import poker_hand_mapper
+from utils.prior.preflop import PreflopPrior, StateKey
+from utils.strength.postflop import poker_hand_mapper
 
 class PreflopRangeFilter:
     """
@@ -20,7 +22,7 @@ class PreflopRangeFilter:
 
     R_t(h) ∝ R_{t-1}(h) * P(a_t | h, s_t, phi)
 
-    phi is the temperature of the range stored inside the GTOPrior.
+    phi is the temperature of the range stored inside the PreflopPrior.
     phi = 0  → pure GTO.
     phi > 0  → wider than GTO (loose player).
     phi < 0  → tighter than GTO (nit).
@@ -31,13 +33,13 @@ class PreflopRangeFilter:
         observer_name: str,
         target_name: str,
         observer_hole_cards: str = "",
-        prior_model: Optional[GTOPrior] = None,
+        prior_model: Optional[PreflopPrior] = None,
         initial_range: Optional[Dict[str, float]] = None,
     ):
         self.observer_name = observer_name
         self.target_name = target_name
         self.observer_hole_cards = observer_hole_cards
-        self.prior_model = prior_model or GTOPrior()
+        self.prior_model = prior_model or PreflopPrior()
         self.range: Dict[str, float] = normalize(
             initial_range or initial_class_prior(dead_cards=observer_hole_cards)
         )
@@ -70,7 +72,7 @@ class PreflopRangeFilter:
         if evidence <= 0:
             raise ValueError(
                 f"Filtering produced zero evidence at state={state_key_str}, "
-                f"action={action_bucket}.  Check the floor in GTOPrior."
+                f"action={action_bucket}.  Check the floor in PreflopPrior."
             )
 
         self.range = {h: v / evidence for h, v in unnorm.items()}

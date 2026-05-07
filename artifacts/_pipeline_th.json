@@ -1,0 +1,155 @@
+{
+  "schema": "bayesian_poker.player_thetas.v1",
+  "global_priors_path": "/Users/kevinliu/Desktop/bayesian poker/artifacts/_pipeline_gp.json",
+  "hands_used": 20,
+  "players": {
+    "Bill": {
+      "theta_pre": [
+        0.1261163188874308,
+        -0.9818907941739453,
+        0.8557744752865135
+      ],
+      "theta_post": [
+        0.5424122227830648,
+        -1.0197064671647742,
+        0.47729424438170936
+      ],
+      "preflop_theta_labels": [
+        "fold_tilt",
+        "call_tilt",
+        "raise_tilt"
+      ],
+      "postflop_theta_labels": [
+        "fold_tilt",
+        "passive_tilt",
+        "aggression_tilt"
+      ],
+      "preflop_bundles": 100,
+      "postflop_hands": 2
+    },
+    "Budd": {
+      "theta_pre": [
+        2.0689974963871647,
+        -3.4372395578159796,
+        1.3682420614288164
+      ],
+      "theta_post": [
+        -0.001540741401312892,
+        0.07622864649086804,
+        -0.07468790508955514
+      ],
+      "preflop_theta_labels": [
+        "fold_tilt",
+        "call_tilt",
+        "raise_tilt"
+      ],
+      "postflop_theta_labels": [
+        "fold_tilt",
+        "passive_tilt",
+        "aggression_tilt"
+      ],
+      "preflop_bundles": 100,
+      "postflop_hands": 2
+    },
+    "Eddie": {
+      "theta_pre": [
+        0.5262205478681395,
+        -1.0948867122947064,
+        0.5686661644265576
+      ],
+      "theta_post": [
+        1.3817145611756312e-16,
+        -0.8720266030463094,
+        0.8720266030463093
+      ],
+      "preflop_theta_labels": [
+        "fold_tilt",
+        "call_tilt",
+        "raise_tilt"
+      ],
+      "postflop_theta_labels": [
+        "fold_tilt",
+        "passive_tilt",
+        "aggression_tilt"
+      ],
+      "preflop_bundles": 95,
+      "postflop_hands": 2
+    },
+    "Gogo": {
+      "theta_pre": [
+        0.1510504207412256,
+        0.18203979153970043,
+        -0.33309021228092567
+      ],
+      "theta_post": [
+        -0.1843014783084281,
+        0.17869809493735753,
+        0.005603383371070605
+      ],
+      "preflop_theta_labels": [
+        "fold_tilt",
+        "call_tilt",
+        "raise_tilt"
+      ],
+      "postflop_theta_labels": [
+        "fold_tilt",
+        "passive_tilt",
+        "aggression_tilt"
+      ],
+      "preflop_bundles": 100,
+      "postflop_hands": 5
+    },
+    "MrWhite": {
+      "theta_pre": [
+        -0.1063714545415707,
+        0.31597480577876635,
+        -0.20960335123720414
+      ],
+      "theta_post": [
+        1.0066908769416356,
+        0.6870957515462288,
+        -1.6937866284878644
+      ],
+      "preflop_theta_labels": [
+        "fold_tilt",
+        "call_tilt",
+        "raise_tilt"
+      ],
+      "postflop_theta_labels": [
+        "fold_tilt",
+        "passive_tilt",
+        "aggression_tilt"
+      ],
+      "preflop_bundles": 100,
+      "postflop_hands": 5
+    },
+    "Pluribus": {
+      "theta_pre": [
+        0.15762957265813535,
+        -0.24552483903518743,
+        0.08789526637705837
+      ],
+      "theta_post": [
+        -0.6669545883015054,
+        0.16192296312449977,
+        0.5050316251770057
+      ],
+      "preflop_theta_labels": [
+        "fold_tilt",
+        "call_tilt",
+        "raise_tilt"
+      ],
+      "postflop_theta_labels": [
+        "fold_tilt",
+        "passive_tilt",
+        "aggression_tilt"
+      ],
+      "preflop_bundles": 100,
+      "postflop_hands": 3
+    }
+  },
+  "notes": {
+    "preflop_em": "theta_pre tilts population logits from train.py beta_preflop.",
+    "postflop_em": "theta_post tilts population logits from train.py beta_facing / beta_no_bet."
+  }
+}

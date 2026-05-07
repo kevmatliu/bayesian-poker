@@ -1,3 +1,5 @@
+"""Post-flop belief over discrete strength buckets (legacy ψ table + phi tilt)."""
+
 from __future__ import annotations
 
 import math
@@ -10,7 +12,15 @@ from utils.filter.helpers import (
     effective_sample_size,
     normalize,
 )
-from utils.gto_prior import ACTION_BUCKETS, CBR_LARGE, CBR_MEDIUM, CBR_SMALL, CHECK_CALL, FOLD, StateKey
+from utils.prior.preflop import (
+    ACTION_BUCKETS,
+    CBR_LARGE,
+    CBR_MEDIUM,
+    CBR_SMALL,
+    CHECK_CALL,
+    FOLD,
+    StateKey,
+)
 
 
 def _build_postflop_psi() -> Dict[str, Dict[int, float]]:

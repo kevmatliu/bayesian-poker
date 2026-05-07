@@ -1,9 +1,11 @@
+"""Shared utilities for filter modules (priors over classes / buckets, normalization)."""
+
 from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Dict, Optional
 
-from utils.hand_map import all_169_classes
+from utils.strength.preflop import all_169_classes
 
 STRENGTH_BUCKETS = [
     "nuts/near-nuts",
