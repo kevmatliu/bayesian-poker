@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
-from typing import Dict, List, Mapping, Sequence, Tuple
+from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple
 
 import numpy as np
 
@@ -106,6 +106,8 @@ def run_postflop_theta_em(
     m_steps: int = 200,
     m_l2: float = 0.25,
     clip: float = 3.0,
+    history_hook: Optional[Callable[[Dict[str, Any]], None]] = None,
+    hand_meta: Optional[Sequence[Mapping[str, Any]]] = None,
 ) -> Tuple[np.ndarray, List[Dict[str, float]]]:
     theta = (
         np.zeros(3, dtype=float)
@@ -115,7 +117,7 @@ def run_postflop_theta_em(
 
     last_per_hand: List[Dict[str, float]] = []
 
-    for _ in range(num_em_iters):
+    for outer in range(num_em_iters):
         prior = PostflopPrior(
             theta_post=tuple(float(x) for x in theta),
             floor=prior_floor,
@@ -124,9 +126,27 @@ def run_postflop_theta_em(
         )
 
         last_per_hand = []
-        for hand_obs in observations_by_hand:
+        for hi, hand_obs in enumerate(observations_by_hand):
             q = e_step_combo_posterior(hand_obs, prior)
             last_per_hand.append(dict(q))
+            if history_hook is not None:
+                meta: Dict[str, Any] = {}
+                if hand_meta is not None and hi < len(hand_meta):
+                    meta = dict(hand_meta[hi])
+                qv = list(q.values())
+                ess = (sum(qv) ** 2) / sum(v * v for v in qv) if qv else 0.0
+                history_hook(
+                    {
+                        "kind": "postflop_e_step",
+                        "em_outer": outer,
+                        "em_timestep": outer,
+                        "hand_index_in_batch": hi,
+                        "theta_post": [float(x) for x in theta],
+                        "max_q": float(max(q.values())) if q else None,
+                        "ess": float(ess),
+                        **meta,
+                    }
+                )
 
         base_prior = PostflopPrior(
             floor=prior_floor,
@@ -145,6 +165,17 @@ def run_postflop_theta_em(
             clip=clip,
             center_each_step=True,
         )
+
+        if history_hook is not None:
+            history_hook(
+                {
+                    "kind": "postflop_m_step",
+                    "em_outer": outer,
+                    "em_timestep": outer,
+                    "theta_post": [float(x) for x in theta],
+                    "n_hands": len(observations_by_hand),
+                }
+            )
 
     return theta, last_per_hand
 

@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
-from typing import Dict, List, Tuple
+from dataclasses import dataclass
+from typing import Dict, Iterable, List, Optional, Tuple
 
 from utils.em import PostflopThetaObservation
+from utils.filter.postflop import combo_key, parse_combo_key
 from utils.prior.postflop import CALL, FOLD, PostflopFeatures, RAISE
+from utils.strength.common import Card, parse_cards
 from utils.strength.postflop import poker_hand_mapper
 
 POSTFLOP_STREETS = ("flop", "turn", "river")
@@ -52,17 +55,24 @@ def _in_position_last_actor(player_order: List[str], alive: List[Tuple[str, bool
     return bool(act) and act[-1] == target
 
 
-def postflop_features_from_state(
-    state,
-    target: str,
-    street: str,
-    hole_cards: str,
-) -> Optional[PostflopFeatures]:
-    """Compute features for *target* acting next in ``state`` with known hole cards."""
+@dataclass(frozen=True)
+class StateContext:
+    """State-dependent features that are constant across hole-card combos."""
+
+    bet_frac_pot: float
+    pot_odds: float
+    in_position: bool
+    multiway: bool
+    spr: float
+    street: str
+    board_wetness: float
+    facing_bet: bool
+
+
+def state_context_from_state(state, target: str, street: str) -> Optional[StateContext]:
+    """Compute the combo-independent context for ``target`` acting next."""
     board = state.community_cards or ""
-    if len(board) < 6:  # need flop minimum 3 cards -> 6 chars
-        return None
-    if not hole_cards or len(hole_cards) < 4:
+    if len(board) < 6:  # need at least the 3-card flop
         return None
 
     hist = state.betting_history or []
@@ -84,21 +94,17 @@ def postflop_features_from_state(
     in_pos = _in_position_last_actor(list(state.player_order), alive, target)
 
     try:
-        info = poker_hand_mapper(hole_cards, board)
+        sample_info = poker_hand_mapper(board[0:4], board)
     except (ValueError, Exception):
-        return None
+        sample_info = None
 
-    tex = info.get("board_texture") or {}
+    tex = (sample_info or {}).get("board_texture") or {}
     wet = _board_wetness_from_mapper(tex)
-    m = float(info.get("made", 0.5))
-    d = float(info.get("draw", 0.0))
 
     bet_frac = (to_call / max(pot, 1e-6)) if facing_bet else 0.0
     pot_odds = (to_call / max(pot + to_call, 1e-6)) if facing_bet else 0.0
 
-    return PostflopFeatures(
-        made=m,
-        draw=d,
+    return StateContext(
         bet_frac_pot=bet_frac,
         pot_odds=pot_odds,
         in_position=in_pos,
@@ -108,6 +114,134 @@ def postflop_features_from_state(
         board_wetness=wet,
         facing_bet=facing_bet,
     )
+
+
+def features_from_context(
+    context: StateContext,
+    made: float,
+    draw: float,
+) -> PostflopFeatures:
+    """Combine state context with a combo's made/draw scores."""
+    return PostflopFeatures(
+        made=float(made),
+        draw=float(draw),
+        bet_frac_pot=context.bet_frac_pot,
+        pot_odds=context.pot_odds,
+        in_position=context.in_position,
+        multiway=context.multiway,
+        spr=context.spr,
+        street=context.street,
+        board_wetness=context.board_wetness,
+        facing_bet=context.facing_bet,
+    )
+
+
+def postflop_features_from_state(
+    state,
+    target: str,
+    street: str,
+    hole_cards: str,
+) -> Optional[PostflopFeatures]:
+    """Compute features for *target* acting next in ``state`` with known hole cards."""
+    if not hole_cards or len(hole_cards) < 4:
+        return None
+    context = state_context_from_state(state, target, street)
+    if context is None:
+        return None
+
+    board = state.community_cards or ""
+    try:
+        info = poker_hand_mapper(hole_cards, board)
+    except (ValueError, Exception):
+        return None
+
+    tex = info.get("board_texture") or {}
+    wet = _board_wetness_from_mapper(tex)
+    made = float(info.get("made", 0.5))
+    draw = float(info.get("draw", 0.0))
+
+    return PostflopFeatures(
+        made=made,
+        draw=draw,
+        bet_frac_pot=context.bet_frac_pot,
+        pot_odds=context.pot_odds,
+        in_position=context.in_position,
+        multiway=context.multiway,
+        spr=context.spr,
+        street=street,
+        board_wetness=wet,
+        facing_bet=context.facing_bet,
+    )
+
+
+def precompute_combo_strengths(
+    combos: Iterable[str],
+    board: str,
+    *,
+    cache: Optional[Dict[Tuple[str, str], Tuple[float, float]]] = None,
+) -> Dict[str, Tuple[float, float]]:
+    """Compute per-combo (made, draw) scores once for a fixed board.
+
+    The optional ``cache`` (keyed by ``(combo_key, board_str)``) lets a caller
+    persist (combo, board) → (made, draw) pairs across consecutive action
+    updates that share the same board, avoiding the dominant
+    ``poker_hand_mapper`` cost.
+    """
+    out: Dict[str, Tuple[float, float]] = {}
+    for combo in combos:
+        cache_key = (combo, board)
+        if cache is not None and cache_key in cache:
+            out[combo] = cache[cache_key]
+            continue
+        try:
+            info = poker_hand_mapper(combo, board)
+        except (ValueError, Exception):
+            continue
+        made = float(info.get("made", 0.5))
+        draw = float(info.get("draw", 0.0))
+        out[combo] = (made, draw)
+        if cache is not None:
+            cache[cache_key] = (made, draw)
+    return out
+
+
+def combo_features_for_state(
+    state,
+    target: str,
+    street: str,
+    combos: Iterable[str],
+    *,
+    strength_cache: Optional[Dict[Tuple[str, str], Tuple[float, float]]] = None,
+) -> Tuple[Optional[StateContext], Dict[str, PostflopFeatures]]:
+    """Return ``(context, {combo_key: PostflopFeatures})`` for an action point.
+
+    Combos blocked by the board (or otherwise un-evaluable) are silently
+    dropped from the output map. The reusable ``strength_cache`` is only valid
+    for as long as the board (community cards) doesn't change.
+    """
+    context = state_context_from_state(state, target, street)
+    if context is None:
+        return None, {}
+
+    board = state.community_cards or ""
+    board_cards = parse_cards([board[i : i + 2] for i in range(0, len(board), 2)])
+    board_set = set(board_cards)
+
+    eligible: List[str] = []
+    for combo in combos:
+        try:
+            ca, cb = parse_combo_key(combo)
+        except ValueError:
+            continue
+        if ca in board_set or cb in board_set:
+            continue
+        eligible.append(combo)
+
+    strengths = precompute_combo_strengths(eligible, board, cache=strength_cache)
+    feats: Dict[str, PostflopFeatures] = {}
+    for combo, (made, draw) in strengths.items():
+        feats[combo] = features_from_context(context, made, draw)
+    return context, feats
 
 
 def collect_postflop_observations_known_hole_cards(

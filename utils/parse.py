@@ -4,10 +4,14 @@ import numpy as np
 from pathlib import Path
 from pokerkit import HandHistory
 
+from utils.filter.postflop import all_combo_keys
 from utils.strength.common import Card
 from utils.strength.postflop import poker_hand_mapper
 from utils.strength.preflop import all_169_classes, get_equivalence_class
 from utils.action_map import classify
+
+_ALL_COMBOS = all_combo_keys()
+_COMBO_INDEX = {key: i for i, key in enumerate(_ALL_COMBOS)}
 
 class State:
     def __init__(
@@ -83,6 +87,11 @@ class Hand:
         self.hand_strength = {                                  # player1 --> player2 --> 7-dim vector of hand strength scores on player2 from player1 perspective
             player_i: {                                      # buckets of nuts/near-nuts, strong made, medium made, weak made, strong draw, weak draw, air
                 player_j: np.zeros(7) for player_j in self.player_names if player_j != player_i
+            } for player_i in self.player_names
+        }
+        self.combo_range = {                                    # player1 --> player2 --> 1326-dim vector of combo frequencies on player2 from player1 perspective
+            player_i: {
+                player_j: np.zeros(len(_ALL_COMBOS)) for player_j in self.player_names if player_j != player_i
             } for player_i in self.player_names
         }
 
@@ -202,6 +211,29 @@ class Hand:
         if total > 0:
             vector = vector / total
         self.hand_range[observer][target] = vector
+        return vector
+
+    def set_combo_range_vector(
+        self, observer: str, target: str, combo_distribution: dict[str, float]
+    ) -> np.ndarray:
+        """Store the 1,326-dim post-flop combo distribution for ``observer → target``."""
+        if observer == target:
+            raise ValueError("Observer and target must be different players.")
+        if observer not in self.combo_range:
+            raise KeyError(f"Unknown observer {observer!r}.")
+        if target not in self.combo_range[observer]:
+            raise KeyError(f"Unknown target {target!r} for observer {observer!r}.")
+
+        vector = np.zeros(len(_ALL_COMBOS), dtype=float)
+        for combo, prob in combo_distribution.items():
+            idx = _COMBO_INDEX.get(combo)
+            if idx is None:
+                continue
+            vector[idx] = float(prob)
+        total = vector.sum()
+        if total > 0:
+            vector = vector / total
+        self.combo_range[observer][target] = vector
         return vector
 
     def next_player(self, curr_player):

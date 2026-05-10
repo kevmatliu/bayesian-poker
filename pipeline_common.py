@@ -453,3 +453,97 @@ def dump_json(path: Path, payload: object) -> Path:
 
 def load_json(path: Path) -> object:
     return json.loads(Path(path).expanduser().resolve().read_text(encoding="utf-8"))
+
+
+def read_session_names_file(path: str | Path) -> List[str]:
+    """One session directory name per non-empty line (e.g. ``30`` → ``pluribus/30``)."""
+    p = Path(path).expanduser().resolve()
+    names: List[str] = []
+    for line in p.read_text(encoding="utf-8").splitlines():
+        s = line.split("#", 1)[0].strip()
+        if s:
+            names.append(s)
+    return names
+
+
+def split_session_names(
+    names: Sequence[str],
+    *,
+    train_frac: float,
+    em_frac: float,
+    online_frac: float,
+    seed: int,
+) -> Tuple[List[str], List[str], List[str]]:
+    """Partition session names into train / EM / online (same counting semantics as ``split_hand_refs``)."""
+    tw = train_frac + em_frac + online_frac
+    if abs(tw - 1.0) > 1e-6:
+        raise ValueError(f"Session fractions must sum to 1.0, got {tw}")
+    order = list(names)
+    rng = random.Random(seed)
+    rng.shuffle(order)
+    n = len(order)
+    if n == 0:
+        return [], [], []
+    nt = min(n, max(0, int(n * train_frac / tw)))
+    nem = min(n - nt, max(0, int(n * em_frac / tw)))
+    non = n - nt - nem
+    train = order[:nt]
+    em_part = order[nt : nt + nem]
+    online = order[nt + nem : nt + nem + non]
+    assert len(train) + len(em_part) + len(online) == n
+    return train, em_part, online
+
+
+def handref_session_hand(path_str: str) -> Tuple[str, str]:
+    """``(session_dir_name, hand_stem)`` from a ``.phh`` path string."""
+    p = Path(path_str)
+    return p.parent.name, p.stem
+
+
+def gather_preflop_bundles_for_target_player(
+    refs: Sequence[HandRef],
+    all_players: Sequence[str],
+    target_player: str,
+    *,
+    restrict_observers: Optional[Sequence[str]] = None,
+) -> Tuple[List[PreflopEMHandBundle], List[Dict[str, Any]]]:
+    """EM bundles where ``target_player`` acts preflop; one meta dict per bundle (session, hand, observer).
+
+    If ``restrict_observers`` is set, only those observer names are used (e.g. a single observer|target pair).
+    Otherwise every name in ``all_players`` except ``target_player`` is considered.
+    """
+    if restrict_observers is not None:
+        observers_iter = list(dict.fromkeys(restrict_observers))
+    else:
+        observers_iter = [p for p in all_players if p != target_player]
+
+    bundles: List[PreflopEMHandBundle] = []
+    metas: List[Dict[str, Any]] = []
+    for ref in refs:
+        if target_player not in ref.hand.player_names:
+            continue
+        for observer in observers_iter:
+            if observer == target_player:
+                continue
+            decisions = preflop_decisions_for_hand(ref.hand, target_player, ref.global_index)
+            if not decisions:
+                continue
+            dead = ref.hand.hole_cards.get(observer, "")
+            initial_range = normalize(initial_class_prior(dead_cards=dead))
+            bundle = PreflopEMHandBundle(
+                tuple(PreflopEMDecision(d.state_key, d.action_bucket) for d in decisions),
+                initial_range,
+            )
+            sess, stem = handref_session_hand(ref.source)
+            bundles.append(bundle)
+            metas.append(
+                {
+                    "session": sess,
+                    "hand_number": int(stem) if stem.isdigit() else stem,
+                    "phh_path": ref.source,
+                    "observer": observer,
+                    "target": target_player,
+                    "n_target_preflop_decisions": len(decisions),
+                }
+            )
+    return bundles, metas

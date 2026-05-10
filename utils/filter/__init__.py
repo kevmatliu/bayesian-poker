@@ -1,10 +1,17 @@
-"""Preflop range and postflop strength Bayesian filters."""
+"""Preflop range and postflop combo Bayesian filters."""
 
-from utils.filter.postflop import PostflopStrengthFilter, postflop_likelihood
+from utils.filter.postflop import (
+    ComboRangeFilter,
+    all_combo_keys,
+    combo_key,
+    parse_combo_key,
+)
 from utils.filter.preflop import PreflopRangeFilter
 
 __all__ = [
-    "PostflopStrengthFilter",
+    "ComboRangeFilter",
     "PreflopRangeFilter",
-    "postflop_likelihood",
+    "all_combo_keys",
+    "combo_key",
+    "parse_combo_key",
 ]

@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 import math
 from dataclasses import dataclass
-from typing import Dict, List, Sequence, Tuple
+from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple
 
 import numpy as np
 
@@ -118,6 +118,8 @@ def run_preflop_em(
     m_l2: float = 0.25,
     m_lr: float = 0.05,
     m_steps: int = 100,
+    history_hook: Optional[Callable[[Dict[str, Any]], None]] = None,
+    bundle_meta: Optional[Sequence[Mapping[str, Any]]] = None,
 ) -> Tuple[np.ndarray, List[Dict[str, float]]]:
     """Alternate E and M steps; return final theta and terminal posteriors q(h)."""
     theta = (
@@ -145,6 +147,27 @@ def run_preflop_em(
         last_q = [e_step_hand_class_posterior(b, prior) for b in bundles]
         max_q = max(max(d.values()) for d in last_q) if last_q else 0.0
         LOG.debug("E-step: max posterior mass in any bundle max_h q(h)=%.4f", max_q)
+
+        if history_hook is not None:
+            for bi, (bundle, qmap) in enumerate(zip(bundles, last_q)):
+                meta: Dict[str, Any] = {}
+                if bundle_meta is not None and bi < len(bundle_meta):
+                    meta = dict(bundle_meta[bi])
+                qs = list(qmap.values())
+                ess = (sum(qs) ** 2) / sum(v * v for v in qs) if qs else 0.0
+                history_hook(
+                    {
+                        "kind": "preflop_e_step",
+                        "em_outer": outer,
+                        "em_timestep": outer,
+                        "bundle_index": bi,
+                        "n_target_preflop_decisions": len(bundle.decisions),
+                        "theta_pre": [float(x) for x in theta],
+                        "max_q": float(max(qmap.values())) if qmap else None,
+                        "ess": float(ess),
+                        **meta,
+                    }
+                )
 
         LOG.info(
             "EM outer iteration %d/%d: M-step (%d gradient steps, lr=%g, l2=%g)",
@@ -179,5 +202,16 @@ def run_preflop_em(
             float(theta[1]),
             float(theta[2]),
         )
+
+        if history_hook is not None:
+            history_hook(
+                {
+                    "kind": "preflop_m_step",
+                    "em_outer": outer,
+                    "em_timestep": outer,
+                    "theta_pre": [float(x) for x in theta],
+                    "n_bundles": len(bundles),
+                }
+            )
 
     return theta, last_q
