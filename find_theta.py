@@ -4,10 +4,12 @@
 from __future__ import annotations
 
 import argparse
+import json
 import logging
 import sys
-import json
+import time
 from collections import defaultdict
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Mapping, MutableMapping, Optional, Sequence, Tuple
 
@@ -17,11 +19,11 @@ from pipeline_common import (
     HandRef,
     dump_json,
     flatten_hands,
+    gather_postflop_bundles_for_target_player,
     gather_preflop_bundles_for_target_player,
     load_json,
 )
 from utils.em import run_postflop_theta_em, run_preflop_em
-from utils.postflop_runner_bridge import collect_postflop_observations_known_hole_cards
 
 LOG = logging.getLogger("find_theta")
 
@@ -65,7 +67,7 @@ def _log_preflop_bundle_composition(target: str, metas: List[Dict[str, Any]]) ->
 def _log_postflop_em_hand_composition(target: str, metas: List[Dict[str, Any]]) -> None:
     if not metas:
         LOG.info(
-            "Postflop EM hands | target=%s | count=0 (no known-hole postflop rows under filter).",
+            "Postflop EM bundles | target=%s | count=0 (no postflop timesteps under observer filter).",
             target,
         )
         return
@@ -73,7 +75,7 @@ def _log_postflop_em_hand_composition(target: str, metas: List[Dict[str, Any]]) 
     for m in metas:
         by_session[str(m["session"])].append(m["hand_number"])
     LOG.info(
-        "Postflop EM hands | target=%s | hands=%d | sessions=%d",
+        "Postflop EM bundles | target=%s | bundles=%d | sessions=%d",
         target,
         len(metas),
         len(by_session),
@@ -85,9 +87,11 @@ def _log_postflop_em_hand_composition(target: str, metas: List[Dict[str, Any]]) 
         LOG.info("  session %r | hands=%d | hand_numbers=%s%s", sess, len(hands), preview, tail)
     for m in metas:
         LOG.debug(
-            "    postflop row | session=%s hand=%s | phh=%s",
+            "    postflop bundle | session=%s hand=%s | observer=%s → target=%s | phh=%s",
             m.get("session"),
             m.get("hand_number"),
+            m.get("observer"),
+            m.get("target"),
             m.get("phh_path"),
         )
 
@@ -169,6 +173,15 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--postflop-m-lr", type=float, default=0.05)
     p.add_argument("--postflop-m-l2", type=float, default=0.25)
     p.add_argument("--postflop-clip", type=float, default=3.0)
+    p.add_argument(
+        "--em-history-dir",
+        type=Path,
+        default=None,
+        help=(
+            "Directory for EM jsonl traces (one file per target player or bilateral pair). "
+            "Each line is flushed immediately. Default when omitted: no jsonl (use INFO logs for progress)."
+        ),
+    )
     p.add_argument(
         "--session",
         action="append",
@@ -313,29 +326,42 @@ def learn_player_thetas(
             em_hist_root.mkdir(parents=True, exist_ok=True)
             if em_pair is not None:
                 em_log_path = em_hist_root / f"{counterpart}_{player}_em.jsonl"
-                pair_file = True
             elif cur_restrict is not None and len(resolved) == 1 and len(cur_restrict) == 1:
                 em_log_path = em_hist_root / f"{cur_restrict[0]}_{player}_em.jsonl"
-                pair_file = True
             else:
                 em_log_path = em_hist_root / f"{player}_em.jsonl"
-                pair_file = False
-            em_log_f = em_log_path.open("w", encoding="utf-8")
-            LOG.info(
-                "EM history jsonl | path=%s | bilateral_pair=%s",
-                em_log_path.resolve(),
-                pair_file,
-            )
+            em_log_f = em_log_path.open("w", encoding="utf-8", newline="\n")
+
+        _em_lines_since_flush = {"n": 0}
 
         def _em_write(rec: Dict[str, Any]) -> None:
             if em_log_f is None:
                 return
             rec = {**rec, "player": player, "theta_target": player}
+            if "ts_utc" not in rec:
+                rec["ts_utc"] = datetime.now(timezone.utc).isoformat()
             if cur_restrict is not None and len(cur_restrict) == 1:
                 rec["preflop_observer_scope"] = cur_restrict[0]
             if em_pair is not None:
                 rec["em_pair"] = [em_pair[0], em_pair[1]]
             em_log_f.write(json.dumps(rec, default=str) + "\n")
+            kind = rec.get("kind")
+            if kind in ("preflop_e_step", "postflop_e_step"):
+                _em_lines_since_flush["n"] += 1
+                if _em_lines_since_flush["n"] % 25 == 0:
+                    em_log_f.flush()
+            else:
+                _em_lines_since_flush["n"] = 0
+                em_log_f.flush()
+
+        if em_log_f is not None:
+            LOG.info("EM jsonl | writing to %s (line-buffered via flush)", em_log_path.resolve())
+            _em_write(
+                {
+                    "kind": "em_player_segment_start",
+                    "note": "Beginning preflop then postflop EM for this player",
+                }
+            )
 
         theta_pre_init = None
         theta_post_init = None
@@ -346,6 +372,14 @@ def learn_player_thetas(
 
         # Preflop EM
         if bundles:
+            LOG.info(
+                "Player %s | starting preflop EM | bundles=%d | outer_iters=%d | m_steps=%d",
+                player,
+                len(bundles),
+                preflop_em_iters,
+                preflop_m_steps,
+            )
+            t0 = time.perf_counter()
             theta_pre, _ = run_preflop_em(
                 bundles,
                 prior_floor=preflop_floor,
@@ -359,36 +393,46 @@ def learn_player_thetas(
                 bundle_meta=bundle_metas,
             )
             theta_pre_list = [float(x) for x in theta_pre]
+            if em_log_f is not None:
+                em_log_f.flush()
+            LOG.info(
+                "Player %s | preflop EM returned in %.2fs | collecting postflop bundles "
+                "(scanning %d hand refs; only refs where target is seated are candidates)…",
+                player,
+                time.perf_counter() - t0,
+                len(refs),
+            )
         else:
             theta_pre_list = [0.0, 0.0, 0.0]
             LOG.warning("Player %s: no preflop EM bundles; theta_pre set to zeros.", player)
 
-        # Postflop EM — one observation list per hand (unique global index)
-        observations_by_hand: List[List] = []
-        postflop_hand_metas: List[Dict[str, Any]] = []
-        for ref in refs:
-            if player not in ref.hand.player_names:
-                continue
-            if cur_postflop_req is not None and cur_postflop_req not in ref.hand.player_names:
-                continue
-            obs = collect_postflop_observations_known_hole_cards(ref.hand, player, ref.global_index)
-            if obs is not None:
-                observations_by_hand.append([obs])
-                _path = Path(ref.source)
-                postflop_hand_metas.append(
-                    {
-                        "session": _path.parent.name,
-                        "hand_number": int(_path.stem) if _path.stem.isdigit() else _path.stem,
-                        "phh_path": ref.source,
-                        "target": player,
-                    }
-                )
+        t_pf0 = time.perf_counter()
+        postflop_bundles, postflop_bundle_metas = gather_postflop_bundles_for_target_player(
+            refs,
+            resolved,
+            player,
+            restrict_observers=cur_restrict,
+            postflop_require_observer=cur_postflop_req,
+        )
+        LOG.info(
+            "Player %s | postflop bundle collection done in %.2fs | bundles=%d",
+            player,
+            time.perf_counter() - t_pf0,
+            len(postflop_bundles),
+        )
 
-        _log_postflop_em_hand_composition(player, postflop_hand_metas)
+        _log_postflop_em_hand_composition(player, postflop_bundle_metas)
 
-        if observations_by_hand:
+        if postflop_bundles:
+            LOG.info(
+                "Player %s | starting postflop EM | bundles=%d | outer_iters=%d | m_steps=%d",
+                player,
+                len(postflop_bundles),
+                postflop_em_iters,
+                postflop_m_steps,
+            )
             theta_post, _ = run_postflop_theta_em(
-                observations_by_hand,
+                postflop_bundles,
                 prior_floor=postflop_floor,
                 theta_init=theta_post_init,
                 beta_facing=beta_facing,
@@ -399,12 +443,15 @@ def learn_player_thetas(
                 m_l2=postflop_m_l2,
                 clip=postflop_clip,
                 history_hook=_em_write if em_log_f is not None else None,
-                hand_meta=postflop_hand_metas,
+                hand_meta=postflop_bundle_metas,
             )
             theta_post_list = [float(x) for x in theta_post]
+            if em_log_f is not None:
+                em_log_f.flush()
+            LOG.info("Player %s | postflop EM finished", player)
         else:
             theta_post_list = [0.0, 0.0, 0.0]
-            LOG.warning("Player %s: no postflop EM observations; theta_post set to zeros.", player)
+            LOG.warning("Player %s: no postflop EM bundles; theta_post set to zeros.", player)
 
         pair_label = None
         if cur_restrict is not None and len(cur_restrict) == 1:
@@ -416,7 +463,8 @@ def learn_player_thetas(
             "preflop_theta_labels": ["fold_tilt", "call_tilt", "raise_tilt"],
             "postflop_theta_labels": ["fold_tilt", "passive_tilt", "aggression_tilt"],
             "preflop_bundles": len(bundles),
-            "postflop_hands": len(observations_by_hand),
+            "postflop_bundles": len(postflop_bundles),
+            "postflop_hands": len(postflop_bundles),
             "loaded_hands_with_this_player_name": appears_in_hands,
             "preflop_observer_names_merged_for_this_target": preflop_observers,
             "preflop_em_observers_filter": list(cur_restrict) if cur_restrict is not None else None,
@@ -426,6 +474,7 @@ def learn_player_thetas(
         }
 
         if em_log_f is not None:
+            _em_write({"kind": "em_player_segment_end", "note": "Finished EM for this player"})
             em_log_f.close()
 
     out: Dict[str, Any] = {
@@ -446,7 +495,10 @@ def learn_player_thetas(
         },
         "notes": {
             "preflop_em": "theta_pre tilts population logits from train.py beta_preflop.",
-            "postflop_em": "theta_post tilts population logits from train.py beta_facing / beta_no_bet.",
+            "postflop_em": (
+                "theta_post tilts population logits from train.py beta_facing / beta_no_bet; "
+                "each bundle uses initial_class_prior→1,326 (observer dead cards) like preflop EM."
+            ),
         },
     }
     if em_pair is not None:
@@ -491,6 +543,7 @@ def main(argv: List[str] | None = None) -> int:
         postflop_m_lr=args.postflop_m_lr,
         postflop_m_l2=args.postflop_m_l2,
         postflop_clip=args.postflop_clip,
+        em_history_dir=args.em_history_dir,
         restrict_preflop_observers=args.preflop_em_observers,
         postflop_require_observer=args.postflop_require_observer,
         em_pair=tuple(args.em_pair) if args.em_pair is not None else None,

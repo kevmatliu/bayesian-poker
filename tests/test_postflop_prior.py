@@ -17,7 +17,13 @@ from utils.prior.postflop import (
     train_baseline_facing_bet,
     train_baseline_no_bet,
 )
-from utils.em import PostflopThetaObservation, single_hand_em_gradient_sample
+from utils.em import (
+    PostflopEMHandBundle,
+    PostflopEMTimestep,
+    PostflopThetaObservation,
+    e_step_postflop_bundle,
+    single_hand_em_gradient_sample,
+)
 
 
 def _feat_facing(m: float = 0.45, d: float = 0.35) -> PostflopFeatures:
@@ -118,6 +124,23 @@ class TestPostflopPrior(unittest.TestCase):
         g = single_hand_em_gradient_sample([obs], prior_floor=0.0)
         self.assertEqual(g.shape, (3,))
         self.assertTrue(np.all(np.isfinite(g)))
+
+    def test_em_bundle_e_step_posterior(self) -> None:
+        f = _feat_facing()
+        bundle = PostflopEMHandBundle(
+            decisions=(
+                PostflopEMTimestep(
+                    action=CALL,
+                    features_by_combo=(("AhKh", f), ("QsJs", f)),
+                ),
+            ),
+            initial_combo_range={"AhKh": 0.5, "QsJs": 0.5},
+        )
+        prior = PostflopPrior(theta_post=(0.0, 0.0, 0.0), floor=0.0)
+        q = e_step_postflop_bundle(bundle, prior)
+        self.assertAlmostEqual(sum(q.values()), 1.0, places=6)
+        self.assertAlmostEqual(q["AhKh"], 0.5, places=5)
+        self.assertAlmostEqual(q["QsJs"], 0.5, places=5)
 
     def test_phi_dimension(self) -> None:
         v = feature_vector(_feat_facing())

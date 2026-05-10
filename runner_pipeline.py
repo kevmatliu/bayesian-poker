@@ -130,6 +130,15 @@ def pipeline_main(argv: Optional[List[str]] = None) -> int:
     )
     parser.add_argument("--warm-start-theta", type=Path, default=None)
     parser.add_argument(
+        "--em-history-dir",
+        type=Path,
+        default=None,
+        help=(
+            "Directory for EM jsonl traces during learn_player_thetas (flushed per record). "
+            "Default: <parent of --player-thetas-out>/em_history"
+        ),
+    )
+    parser.add_argument(
         "--preflop-train-epochs",
         type=int,
         default=10,
@@ -156,6 +165,9 @@ def pipeline_main(argv: Optional[List[str]] = None) -> int:
     )
 
     args = parser.parse_args(argv)
+    em_history_resolved = args.em_history_dir
+    if em_history_resolved is None:
+        em_history_resolved = args.player_thetas_out.parent / "em_history"
 
     pj = PipelineJsonLogger()
     pj.record("pipeline_begin", config=_json_safe(vars(args)))
@@ -258,7 +270,9 @@ def pipeline_main(argv: Optional[List[str]] = None) -> int:
             postflop_theta_em_iters=args.postflop_theta_em_iters,
             postflop_theta_m_steps=args.postflop_theta_m_steps,
             warm_start_theta=args.warm_start_theta,
+            em_history_dir=str(em_history_resolved.resolve()),
         )
+        LOG.info("EM jsonl traces → %s", em_history_resolved.resolve())
         thetas_payload = learn_player_thetas(
             refs=theta_refs,
             global_priors_path=args.global_priors_out,
@@ -267,6 +281,7 @@ def pipeline_main(argv: Optional[List[str]] = None) -> int:
             preflop_m_steps=args.preflop_theta_m_steps,
             postflop_em_iters=args.postflop_theta_em_iters,
             postflop_m_steps=args.postflop_theta_m_steps,
+            em_history_dir=em_history_resolved,
         )
         players_block = thetas_payload.get("players") or {}
         pj.record(

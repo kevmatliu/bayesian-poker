@@ -13,12 +13,17 @@ Use ``TendencyEM`` as the namespace for phase-specific runners.
 
 from __future__ import annotations
 
-from utils.em.common import EMPhase, normalize_log_weights
+from utils.em.common import EMPhase, M_STEP_GRAD_NORM_TOL, normalize_log_weights
 from utils.em.postflop import (
+    PostflopEMHandBundle,
+    PostflopEMTimestep,
     PostflopThetaObservation,
     e_step_combo_posterior,
+    e_step_postflop_bundle,
     m_step_theta_post_gradient_ascent,
+    m_step_theta_post_gradient_ascent_bundles,
     postflop_theta_gradient,
+    postflop_theta_gradient_bundles,
     run_postflop_theta_em,
     single_hand_em_gradient_sample,
 )
@@ -40,16 +45,21 @@ class TendencyEM:
 
 __all__ = [
     "EMPhase",
+    "M_STEP_GRAD_NORM_TOL",
+    "PostflopEMHandBundle",
+    "PostflopEMTimestep",
     "PostflopThetaObservation",
     "PreflopEMDecision",
     "PreflopEMHandBundle",
     "TendencyEM",
     "e_step_combo_posterior",
     "e_step_hand_class_posterior",
-    "m_step_theta_post",
+    "e_step_postflop_bundle",
     "m_step_theta_post_gradient_ascent",
+    "m_step_theta_post_gradient_ascent_bundles",
     "normalize_log_weights",
     "postflop_theta_gradient",
+    "postflop_theta_gradient_bundles",
     "run_postflop_theta_em",
     "run_preflop_em",
     "single_hand_em_gradient_sample",

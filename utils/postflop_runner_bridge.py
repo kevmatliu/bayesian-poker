@@ -5,13 +5,27 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Dict, Iterable, List, Optional, Tuple
 
-from utils.em import PostflopThetaObservation
-from utils.filter.postflop import combo_key, parse_combo_key
+from utils.em import PostflopEMHandBundle, PostflopEMTimestep, PostflopThetaObservation
+from utils.filter.helpers import initial_class_prior, normalize
+from utils.filter.postflop import ComboRangeFilter, combo_key, parse_combo_key
 from utils.prior.postflop import CALL, FOLD, PostflopFeatures, RAISE
 from utils.strength.common import Card, parse_cards
-from utils.strength.postflop import poker_hand_mapper
+from utils.strength.postflop import board_texture, poker_hand_mapper
 
 POSTFLOP_STREETS = ("flop", "turn", "river")
+
+
+def postflop_target_decisions_for_hand(hand, target: str) -> List[Tuple[str, int, Tuple]]:
+    """(street, action_index, raw_action_tuple) for each postflop action by ``target``."""
+    decisions: List[Tuple[str, int, Tuple]] = []
+    for street in POSTFLOP_STREETS:
+        actions = hand.actions.get(street, {})
+        for action_index in sorted(actions):
+            actor = actions[action_index][0]
+            if actor != target:
+                continue
+            decisions.append((street, action_index, actions[action_index]))
+    return decisions
 
 
 def raw_action_bucket_to_postflop(bucket: int) -> int:
@@ -93,12 +107,15 @@ def state_context_from_state(state, target: str, street: str) -> Optional[StateC
 
     in_pos = _in_position_last_actor(list(state.player_order), alive, target)
 
+    # Board texture only depends on community cards; avoid full ``poker_hand_mapper``
+    # (best-hand + percentiles) which was dominating bundle collection.
     try:
-        sample_info = poker_hand_mapper(board[0:4], board)
+        b_cards = parse_cards([board[i : i + 2] for i in range(0, len(board), 2)])
+        if len(b_cards) < 3:
+            return None
+        tex = board_texture(b_cards)
     except (ValueError, Exception):
-        sample_info = None
-
-    tex = (sample_info or {}).get("board_texture") or {}
+        tex = {}
     wet = _board_wetness_from_mapper(tex)
 
     bet_frac = (to_call / max(pot, 1e-6)) if facing_bet else 0.0
@@ -244,6 +261,98 @@ def combo_features_for_state(
     return context, feats
 
 
+def collect_postflop_em_bundle_for_hand(
+    hand,
+    observer: str,
+    target: str,
+    hand_index: int,
+    *,
+    target_actions: Optional[List[Tuple[str, int, Tuple]]] = None,
+) -> Optional[PostflopEMHandBundle]:
+    """EM bundle: same prior construction as preflop EM (initial_class_prior → 1,326 combos).
+
+    Uses observer dead cards + board progression for support only (no Bayesian filtering on
+    actions). Target hole cards are not required.
+
+    Pass ``target_actions`` when the caller already computed
+    :func:`postflop_target_decisions_for_hand` for this (hand, target) — e.g. once per hand
+    instead of once per observer.
+    """
+    if observer == target:
+        return None
+    if target_actions is None:
+        target_actions = postflop_target_decisions_for_hand(hand, target)
+    if not target_actions:
+        return None
+
+    observer_hole = hand.hole_cards.get(observer, "") or ""
+    initial_169 = normalize(initial_class_prior(dead_cards=observer_hole))
+
+    timesteps: List[PostflopEMTimestep] = []
+    strength_cache: Dict[Tuple[str, str], Tuple[float, float]] = {}
+    last_board: Optional[str] = None
+    combos: Dict[str, float] = {}
+    initialized = False
+    initial_snapshot: Optional[Dict[str, float]] = None
+
+    for street, action_index, raw_action in target_actions:
+        states = hand.states.get(street, [])
+        if action_index >= len(states):
+            continue
+        state = states[action_index]
+        board = state.community_cards or ""
+        if len(board) < 6:
+            continue
+
+        if not initialized or board != last_board:
+            if not initialized:
+                try:
+                    combos = ComboRangeFilter.explode_preflop_to_combos(
+                        initial_169,
+                        observer_hole,
+                        board,
+                    )
+                except ValueError:
+                    return None
+                initial_snapshot = dict(combos)
+                initialized = True
+            else:
+                try:
+                    combos = ComboRangeFilter.narrow_combo_distribution(
+                        combos,
+                        observer_hole_cards=observer_hole,
+                        board_cards=board,
+                    )
+                except ValueError:
+                    return None
+            last_board = board
+            strength_cache.clear()
+
+        _, feats = combo_features_for_state(
+            state,
+            target,
+            street,
+            combos.keys(),
+            strength_cache=strength_cache,
+        )
+        if not feats:
+            continue
+
+        raw_bucket = int(raw_action[1][0])
+        post_action = raw_action_bucket_to_postflop(raw_bucket)
+        sparse_pairs = tuple((c, feats[c]) for c in combos if combos[c] > 0.0 and c in feats)
+        if not sparse_pairs:
+            continue
+        timesteps.append(PostflopEMTimestep(action=post_action, features_by_combo=sparse_pairs))
+
+    if not timesteps or initial_snapshot is None:
+        return None
+    return PostflopEMHandBundle(
+        decisions=tuple(timesteps),
+        initial_combo_range=normalize(dict(initial_snapshot)),
+    )
+
+
 def collect_postflop_observations_known_hole_cards(
     hand,
     target: str,
@@ -284,22 +393,31 @@ def collect_postflop_observations_known_hole_cards(
     )
 
 
-def collect_session_postflop_hands_by_pair(
+def collect_session_postflop_bundles_by_pair(
     hands: List,
     observers: List[str],
     targets: List[str],
-) -> Dict[Tuple[str, str], List[List[PostflopThetaObservation]]]:
-    """For EM: one inner list per hand (single combo); unknown holes skipped."""
-    out: Dict[Tuple[str, str], List[List[PostflopThetaObservation]]] = {}
+) -> Dict[Tuple[str, str], List[PostflopEMHandBundle]]:
+    """For EM: one :class:`PostflopEMHandBundle` per hand with target postflop actions."""
+    out: Dict[Tuple[str, str], List[PostflopEMHandBundle]] = {}
     for observer in observers:
         for target in targets:
             out[(observer, target)] = []
 
     for hi, hand in enumerate(hands):
+        ta_by_target = {t: postflop_target_decisions_for_hand(hand, t) for t in targets}
         for observer in observers:
             for target in targets:
-                obs = collect_postflop_observations_known_hole_cards(hand, target, hi)
-                if obs is not None:
-                    out[(observer, target)].append([obs])
+                if observer == target:
+                    continue
+                bundle = collect_postflop_em_bundle_for_hand(
+                    hand,
+                    observer,
+                    target,
+                    hi,
+                    target_actions=ta_by_target.get(target),
+                )
+                if bundle is not None:
+                    out[(observer, target)].append(bundle)
 
     return out

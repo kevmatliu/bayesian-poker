@@ -7,6 +7,7 @@ folder holds numbered ``.phh`` files, one file per *hand* in that session.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import random
 import sys
@@ -19,14 +20,20 @@ from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 import numpy as np
 
 REPO_ROOT = Path(__file__).resolve().parent
+
+LOG_PC = logging.getLogger(__name__)
 for path in (str(REPO_ROOT), str(REPO_ROOT / "utils")):
     if path not in sys.path:
         sys.path.insert(0, path)
 
-from utils.em import PreflopEMDecision, PreflopEMHandBundle
+from utils.em import PostflopEMHandBundle, PreflopEMDecision, PreflopEMHandBundle
 from utils.filter.helpers import initial_class_prior, normalize
 from utils.parse import Hand
-from utils.postflop_runner_bridge import collect_postflop_observations_known_hole_cards
+from utils.postflop_runner_bridge import (
+    collect_postflop_em_bundle_for_hand,
+    collect_postflop_observations_known_hole_cards,
+    postflop_target_decisions_for_hand,
+)
 from utils.prior.postflop import (
     FOLD,
     feature_vector,
@@ -544,6 +551,80 @@ def gather_preflop_bundles_for_target_player(
                     "observer": observer,
                     "target": target_player,
                     "n_target_preflop_decisions": len(decisions),
+                }
+            )
+    return bundles, metas
+
+
+def gather_postflop_bundles_for_target_player(
+    refs: Sequence[HandRef],
+    all_players: Sequence[str],
+    target_player: str,
+    *,
+    restrict_observers: Optional[Sequence[str]] = None,
+    postflop_require_observer: Optional[str] = None,
+) -> Tuple[List[PostflopEMHandBundle], List[Dict[str, Any]]]:
+    """Postflop EM bundles: same prior as preflop EM (169 → 1,326) with observer dead cards.
+
+    One bundle per (hand, observer) where the target has postflop actions. If
+    ``postflop_require_observer`` is set, skip hands where that name is not seated.
+    """
+    if restrict_observers is not None:
+        observers_iter = list(dict.fromkeys(restrict_observers))
+    else:
+        observers_iter = [p for p in all_players if p != target_player]
+
+    bundles: List[PostflopEMHandBundle] = []
+    metas: List[Dict[str, Any]] = []
+    n_seen = 0
+    n_refs_checked = 0
+    progress_every = 500
+    if len(refs) <= 200:
+        progress_every = 5
+    elif len(refs) <= 2000:
+        progress_every = 50
+    for ref in refs:
+        n_refs_checked += 1
+        if target_player not in ref.hand.player_names:
+            continue
+        if postflop_require_observer is not None and postflop_require_observer not in ref.hand.player_names:
+            continue
+        n_seen += 1
+        if n_seen == 1 or n_seen % progress_every == 0:
+            LOG_PC.info(
+                "gather_postflop_bundles | target=%s | refs_checked=%d | "
+                "candidate_hands_target_seated=%d | bundles_so_far=%d",
+                target_player,
+                n_refs_checked,
+                n_seen,
+                len(bundles),
+            )
+        target_actions = postflop_target_decisions_for_hand(ref.hand, target_player)
+        if not target_actions:
+            continue
+        for observer in observers_iter:
+            if observer == target_player:
+                continue
+            bundle = collect_postflop_em_bundle_for_hand(
+                ref.hand,
+                observer,
+                target_player,
+                ref.global_index,
+                target_actions=target_actions,
+            )
+            if bundle is None:
+                continue
+            sess, stem = handref_session_hand(ref.source)
+            bundles.append(bundle)
+            metas.append(
+                {
+                    "session": sess,
+                    "hand_number": int(stem) if stem.isdigit() else stem,
+                    "phh_path": ref.source,
+                    "observer": observer,
+                    "target": target_player,
+                    "n_target_postflop_timesteps": len(bundle.decisions),
+                    "n_combos_in_prior": len(bundle.initial_combo_range),
                 }
             )
     return bundles, metas

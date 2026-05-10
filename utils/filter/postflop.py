@@ -232,6 +232,39 @@ class ComboRangeFilter:
         self.combos = normalize(survivors) if renormalize else survivors
         return self.combos
 
+    @staticmethod
+    def narrow_combo_distribution(
+        combos: Mapping[str, float],
+        *,
+        observer_hole_cards: CardsLike,
+        board_cards: CardsLike,
+        renormalize: bool = True,
+    ) -> Dict[str, float]:
+        """Drop combos conflicting with observer holes or board; optionally renormalize."""
+        if not combos:
+            return {}
+        observer = _coerce_cards(observer_hole_cards)
+        board_cards_list = _coerce_cards(board_cards)
+        for c in observer:
+            if c in board_cards_list:
+                raise ValueError(
+                    f"narrow_combo_distribution: observer card {c!r} appears on the board."
+                )
+        dead = set(observer) | set(board_cards_list)
+        survivors: Dict[str, float] = {}
+        for combo, prob in combos.items():
+            if prob <= 0.0:
+                continue
+            ca, cb = parse_combo_key(combo)
+            if ca in dead or cb in dead:
+                continue
+            survivors[combo] = prob
+        if not survivors:
+            raise ValueError(
+                "narrow_combo_distribution: every combo is blocked by observer cards or board."
+            )
+        return normalize(survivors) if renormalize else survivors
+
     def update(
         self,
         action_bucket: int,

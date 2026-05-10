@@ -2,6 +2,7 @@
 
 from utils.em import (
     EMPhase,
+    PostflopEMHandBundle,
     PostflopThetaObservation,
     PreflopEMDecision,
     PreflopEMHandBundle,
@@ -17,6 +18,7 @@ __all__ = [
     "EMPhase",
     "InferencePhase",
     "PreflopEMDecision",
+    "PostflopEMHandBundle",
     "PostflopThetaObservation",
     "PreflopEMHandBundle",
     "TendencyEM",

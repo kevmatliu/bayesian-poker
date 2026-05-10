@@ -102,6 +102,25 @@ class TestExplodePreflopToCombos(unittest.TestCase):
         self.assertAlmostEqual(sum(kk), 0.7, places=10)
 
 
+class TestNarrowComboDistribution(unittest.TestCase):
+    def test_turn_card_removes_conflicting_mass(self) -> None:
+        rng = {cls: 0.0 for cls in all_169_classes()}
+        rng["AA"] = 1.0
+        flop = ComboRangeFilter.explode_preflop_to_combos(rng, "", "As2c3d")
+        self.assertEqual(len(flop), 3)
+        turn = ComboRangeFilter.narrow_combo_distribution(
+            flop,
+            observer_hole_cards="",
+            board_cards="As2c3dAd",
+        )
+        # Ad on board kills AhAd and AdAc; only AhAc remains among the three AA combos.
+        self.assertEqual(len(turn), 1)
+        self.assertAlmostEqual(sum(turn.values()), 1.0, places=10)
+        for combo in turn:
+            ca, cb = parse_combo_key(combo)
+            self.assertNotIn(parse_card("Ad"), (ca, cb))
+
+
 class TestComboRangeFilterUpdate(unittest.TestCase):
     def _make_filter(self) -> ComboRangeFilter:
         f = ComboRangeFilter(

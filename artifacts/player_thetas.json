@@ -3,16 +3,16 @@
   "global_priors_path": "/Users/kevinliu/Desktop/bayesian poker/artifacts/global_priors.json",
   "hands_used": 80,
   "players": {
-    "Pluribus": {
+    "Gogo": {
       "theta_pre": [
-        -0.057107901897253774,
-        0.07934676388206464,
-        -0.022238861984791962
+        -0.013961493463220133,
+        0.03958414403425424,
+        -0.025622650571033443
       ],
       "theta_post": [
-        -0.09218622847491473,
-        0.38396325031610873,
-        -0.29177702184119403
+        -0.07146558143152937,
+        -0.05437258566036346,
+        0.12583816709189283
       ],
       "preflop_theta_labels": [
         "fold_tilt",
@@ -25,6 +25,42 @@
         "aggression_tilt"
       ],
       "preflop_bundles": 78,
+      "postflop_bundles": 18,
+      "postflop_hands": 18,
+      "loaded_hands_with_this_player_name": 80,
+      "preflop_observer_names_merged_for_this_target": [
+        "Pluribus"
+      ],
+      "preflop_em_observers_filter": [
+        "Pluribus"
+      ],
+      "postflop_require_observer": "Pluribus",
+      "observer_target_pair_label": "Pluribus|Gogo",
+      "em_history_jsonl": "/Users/kevinliu/Desktop/bayesian poker/thetas/Pluribus_Gogo_em.jsonl"
+    },
+    "Pluribus": {
+      "theta_pre": [
+        -0.05710772910779409,
+        0.07934609786540416,
+        -0.022238368757609536
+      ],
+      "theta_post": [
+        -0.0832837447740068,
+        0.3824363478917153,
+        -0.29915260311770847
+      ],
+      "preflop_theta_labels": [
+        "fold_tilt",
+        "call_tilt",
+        "raise_tilt"
+      ],
+      "postflop_theta_labels": [
+        "fold_tilt",
+        "passive_tilt",
+        "aggression_tilt"
+      ],
+      "preflop_bundles": 78,
+      "postflop_bundles": 16,
       "postflop_hands": 16,
       "loaded_hands_with_this_player_name": 80,
       "preflop_observer_names_merged_for_this_target": [
@@ -45,12 +81,14 @@
   },
   "notes": {
     "preflop_em": "theta_pre tilts population logits from train.py beta_preflop.",
-    "postflop_em": "theta_post tilts population logits from train.py beta_facing / beta_no_bet."
+    "postflop_em": "theta_post tilts population logits from train.py beta_facing / beta_no_bet; each bundle uses initial_class_prior\u21921,326 (observer dead cards) like preflop EM."
   },
   "em_scope": {
-    "restrict_preflop_observers": [
-      "Gogo"
+    "mode": "bilateral_pair",
+    "em_pair": [
+      "Gogo",
+      "Pluribus"
     ],
-    "postflop_require_observer": "Gogo"
+    "note": "Each entry in players uses the counterpart as sole preflop observer and postflop co-seat filter."
   }
 }

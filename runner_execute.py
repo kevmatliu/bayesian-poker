@@ -16,9 +16,9 @@ from utils.prior.postflop import PostflopPrior
 from utils.prior.preflop import PreflopPrior, state_key_from_parse_state
 from utils.parse import Hand, Session
 from utils.postflop_runner_bridge import (
-    POSTFLOP_STREETS,
-    collect_session_postflop_hands_by_pair,
+    collect_session_postflop_bundles_by_pair,
     combo_features_for_state,
+    postflop_target_decisions_for_hand,
     raw_action_bucket_to_postflop,
 )
 
@@ -156,25 +156,25 @@ def _run_preflop_em_per_pair(
 
 
 def _run_postflop_em_per_pair(
-    groups: Dict[Tuple[str, str], List[List[Any]]],
+    groups: Dict[Tuple[str, str], List[Any]],
     pf_cfg: EMPostflopRunConfig,
 ) -> Tuple[Dict[str, List[float]], Dict[str, int]]:
     theta_out: Dict[str, List[float]] = {}
     counts: Dict[str, int] = {}
     nonempty = [(pair, seq) for pair, seq in groups.items() if seq]
     total_pairs = len(nonempty)
-    for idx, ((observer, target), observations_by_hand) in enumerate(nonempty, start=1):
+    for idx, ((observer, target), bundles_by_hand) in enumerate(nonempty, start=1):
         pair_label = f"{observer}|{target}"
-        n_hands = len(observations_by_hand)
+        n_hands = len(bundles_by_hand)
         LOG.info(
-            "Post-flop EM pair %d/%d: %s (%d hands with known target hole cards)",
+            "Post-flop EM pair %d/%d: %s (%d hands with target postflop actions)",
             idx,
             total_pairs,
             pair_label,
             n_hands,
         )
         theta, _ = run_postflop_theta_em(
-            observations_by_hand,
+            bundles_by_hand,
             prior_floor=pf_cfg.prior_floor,
             num_em_iters=pf_cfg.outer_iters,
             m_lr=pf_cfg.m_lr,
@@ -202,18 +202,18 @@ def _compute_postflop_em_result(
     if not pf_cfg or not pf_cfg.enabled:
         return EMPostflopResult()
 
-    LOG.info("Post-flop EM: collecting hands with known target hole cards")
-    groups = collect_session_postflop_hands_by_pair(list(hands), resolved_observers, resolved_targets)
+    LOG.info("Post-flop EM: collecting combo-prior bundles (observer dead cards + board)")
+    groups = collect_session_postflop_bundles_by_pair(list(hands), resolved_observers, resolved_targets)
     n_bundles = sum(len(v) for v in groups.values())
     LOG.info("Post-flop EM: %d hand bundles (pre pair-breakdown)", n_bundles)
 
     if n_bundles == 0:
         LOG.warning(
-            "Post-flop EM: no usable hands (need target hole cards in .phh and post-flop actions)."
+            "Post-flop EM: no usable hands (need target postflop actions and valid combo prior)."
         )
         return EMPostflopResult(
             enabled=True,
-            note="No post-flop EM data: unknown target cards or no post-flop target actions.",
+            note="No post-flop EM data: no target postflop actions or combo prior could not be built.",
         )
 
     theta_pf, counts_pf = _run_postflop_em_per_pair(groups, pf_cfg)
@@ -229,7 +229,7 @@ def _compute_postflop_em_result(
         m_learning_rate=pf_cfg.m_lr,
         m_l2=pf_cfg.m_l2,
         hands_with_target_cards_per_pair=counts_pf,
-        note="Learned from hands where the target's hole cards appear in the history.",
+        note="Learned from hands with target postflop actions; latent combo prior matches preflop EM (initial_class_prior → 1,326).",
     )
 
 
@@ -256,18 +256,6 @@ def _learned_postflop_prior_for_pair(
     return PostflopPrior(theta_post=tuple(theta_by_pair[key]), floor=floor)
 
 
-def _postflop_decisions_for_hand(hand: Hand, target: str) -> List[Tuple[str, int, Tuple]]:
-    decisions: List[Tuple[str, int, Tuple]] = []
-    for street in POSTFLOP_STREETS:
-        actions = hand.actions.get(street, {})
-        for action_index in sorted(actions):
-            actor = actions[action_index][0]
-            if actor != target:
-                continue
-            decisions.append((street, action_index, actions[action_index]))
-    return decisions
-
-
 def _fmt_filter_tag(filter_tag: str) -> str:
     return f"[{filter_tag}] " if filter_tag else ""
 
@@ -287,7 +275,7 @@ def _run_postflop_combo_filter_for_hand(
     filter_tag: str = "",
 ) -> Tuple[List[PostflopDecision], List[Dict[str, float]], Dict[str, float], float]:
     tag = _fmt_filter_tag(filter_tag)
-    target_actions = _postflop_decisions_for_hand(hand, target)
+    target_actions = postflop_target_decisions_for_hand(hand, target)
     if not target_actions:
         if filter_verbose:
             LOG.info("%sFilter postflop skip | %s→%s | no target postflop actions", tag, observer, target)

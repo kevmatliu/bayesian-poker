@@ -9,6 +9,9 @@ from typing import Dict
 
 LOG = logging.getLogger(__name__)
 
+# M-step gradient ascent stops when L2 norm of grad falls below this (after L2 penalty on theta).
+M_STEP_GRAD_NORM_TOL = 1e-5
+
 
 class EMPhase(Enum):
     """Which tendency vector EM is optimizing."""
