@@ -12,13 +12,12 @@ from pipeline_common import dump_json, flatten_hands, read_session_names_file, s
 from utils.filter import ComboRangeFilter
 from utils.parse import Session
 from utils.postflop_runner_bridge import POSTFLOP_STREETS
-from utils.prior.postflop import PostflopPrior
-from utils.prior.preflop import PreflopPrior
-
-from find_theta import learn_player_thetas, load_global_priors
+from find_theta import learn_player_thetas
+from utils.em.common import POSTFLOP_M_BATCH_SIZE, PREFLOP_M_BATCH_SIZE
+from priors_artifacts import preflop_postflop_priors_for_target
 from train import train_global_priors
 
-from runner_execute import LOG, PREFLOP_PRIOR_FLOOR, _run_preflop_filter_for_hand, all_combo_keys
+from runner_execute import LOG, _run_preflop_filter_for_hand, all_combo_keys
 
 
 def _board_at_street_end(hand, street: str) -> str:
@@ -77,35 +76,6 @@ def _range_history_rows_for_hand(
     return rows
 
 
-def _priors_for_online_target(
-    target: str,
-    global_priors_path: Path,
-    players_block: Dict[str, Any],
-) -> Tuple[PreflopPrior, PostflopPrior]:
-    beta_preflop, beta_facing, beta_no_bet = load_global_priors(global_priors_path)
-    if target not in players_block:
-        raise ValueError(
-            f"Target {target!r} missing from player θ JSON (not seen during EM?). "
-            f"Keys: {sorted(players_block.keys())}"
-        )
-    entry = players_block[target]
-    tp = entry["theta_pre"]
-    ts = entry["theta_post"]
-    return (
-        PreflopPrior(
-            theta_pre=tuple(float(x) for x in tp),
-            floor=PREFLOP_PRIOR_FLOOR,
-            beta_preflop=beta_preflop,
-        ),
-        PostflopPrior(
-            theta_post=tuple(float(x) for x in ts),
-            floor=1e-6,
-            beta_facing=beta_facing,
-            beta_no_bet=beta_no_bet,
-        ),
-    )
-
-
 def session_split_main(argv: Optional[List[str]] = None) -> int:
     try:
         import pandas as pd
@@ -151,6 +121,18 @@ def session_split_main(argv: Optional[List[str]] = None) -> int:
     parser.add_argument("--preflop-train-epochs", type=int, default=50)
     parser.add_argument("--postflop-train-epochs", type=int, default=50)
     parser.add_argument("--preflop-m-steps", type=int, default=100)
+    parser.add_argument(
+        "--preflop-m-batch-size",
+        type=int,
+        default=PREFLOP_M_BATCH_SIZE,
+        help="Preflop M-step minibatch size (bundles per grad step). 0 = full-batch.",
+    )
+    parser.add_argument(
+        "--postflop-m-batch-size",
+        type=int,
+        default=POSTFLOP_M_BATCH_SIZE,
+        help="Postflop M-step minibatch size (hands per grad step). 0 = full-batch.",
+    )
     parser.add_argument("--postflop-m-steps", type=int, default=200)
     parser.add_argument("--log-level", default="INFO", choices=("DEBUG", "INFO", "WARNING", "ERROR"))
 
@@ -252,6 +234,8 @@ def session_split_main(argv: Optional[List[str]] = None) -> int:
         preflop_em_iters=1,
         postflop_em_iters=1,
         preflop_m_steps=args.preflop_m_steps,
+        preflop_m_batch_size=args.preflop_m_batch_size,
+        postflop_m_batch_size=args.postflop_m_batch_size,
         postflop_m_steps=args.postflop_m_steps,
         em_history_dir=args.thetas_dir,
     )
@@ -262,7 +246,7 @@ def session_split_main(argv: Optional[List[str]] = None) -> int:
     priors_by_target: Dict[str, Tuple[PreflopPrior, PostflopPrior]] = {}
     for pname in (p_a, p_b):
         try:
-            priors_by_target[pname] = _priors_for_online_target(
+            priors_by_target[pname] = preflop_postflop_priors_for_target(
                 pname,
                 args.global_priors_out,
                 players_block,

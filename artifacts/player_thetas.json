@@ -1,0 +1,118 @@
+{
+  "schema": "bayesian_poker.player_thetas.v1",
+  "global_priors_path": "/Users/kevinliu/Desktop/bayesian poker/artifacts/global_priors.json",
+  "hands_used": 541,
+  "players": {
+    "MrBlue": {
+      "theta_pre": [
+        -0.0421369375353596,
+        0.210194355472993,
+        -0.1680574179376321
+      ],
+      "theta_post": [
+        0.27402822644465136,
+        -0.007978220888401241,
+        -0.26605000555625014
+      ],
+      "preflop_theta_labels": [
+        "fold_tilt",
+        "call_tilt",
+        "raise_tilt"
+      ],
+      "postflop_theta_labels": [
+        "fold_tilt",
+        "passive_tilt",
+        "aggression_tilt"
+      ],
+      "preflop_bundles": 1058,
+      "postflop_bundles": 242,
+      "postflop_hands": 242,
+      "loaded_hands_with_this_player_name": 541,
+      "preflop_observer_names_merged_for_this_target": [
+        "Bill",
+        "Pluribus"
+      ],
+      "preflop_em_observers_filter": null,
+      "postflop_require_observer": null,
+      "observer_target_pair_label": null,
+      "em_history_jsonl": null
+    },
+    "Bill": {
+      "theta_pre": [
+        0.07221144398206526,
+        -0.19177467202281012,
+        0.11956322804074591
+      ],
+      "theta_post": [
+        -0.10694063141477672,
+        0.04112186215077278,
+        0.06581876926400394
+      ],
+      "preflop_theta_labels": [
+        "fold_tilt",
+        "call_tilt",
+        "raise_tilt"
+      ],
+      "postflop_theta_labels": [
+        "fold_tilt",
+        "passive_tilt",
+        "aggression_tilt"
+      ],
+      "preflop_bundles": 1072,
+      "postflop_bundles": 200,
+      "postflop_hands": 200,
+      "loaded_hands_with_this_player_name": 541,
+      "preflop_observer_names_merged_for_this_target": [
+        "MrBlue",
+        "Pluribus"
+      ],
+      "preflop_em_observers_filter": null,
+      "postflop_require_observer": null,
+      "observer_target_pair_label": null,
+      "em_history_jsonl": null
+    },
+    "Pluribus": {
+      "theta_pre": [
+        0.1713799509145138,
+        -0.17268942204766088,
+        0.0013094711331466215
+      ],
+      "theta_post": [
+        0.04016665298651294,
+        -0.07375753639596024,
+        0.033590883409447304
+      ],
+      "preflop_theta_labels": [
+        "fold_tilt",
+        "call_tilt",
+        "raise_tilt"
+      ],
+      "postflop_theta_labels": [
+        "fold_tilt",
+        "passive_tilt",
+        "aggression_tilt"
+      ],
+      "preflop_bundles": 1076,
+      "postflop_bundles": 198,
+      "postflop_hands": 198,
+      "loaded_hands_with_this_player_name": 541,
+      "preflop_observer_names_merged_for_this_target": [
+        "Bill",
+        "MrBlue"
+      ],
+      "preflop_em_observers_filter": null,
+      "postflop_require_observer": null,
+      "observer_target_pair_label": null,
+      "em_history_jsonl": null
+    }
+  },
+  "player_identity": {
+    "theta_key": "Exact player name string from parsed .phh files (case-sensitive).",
+    "cross_session": "The same string in different session folders denotes the same \u03b8; a roster name that only appears in session A never receives updates from session B.",
+    "isolation": "Each entry in ``players`` is fit in a separate EM loop. Updating one name does not change tensors or JSON fields for any other name."
+  },
+  "notes": {
+    "preflop_em": "theta_pre tilts population logits from train.py beta_preflop.",
+    "postflop_em": "theta_post tilts population logits from train.py beta_facing / beta_no_bet; each bundle uses initial_class_prior\u21921,326 (observer dead cards) like preflop EM."
+  }
+}

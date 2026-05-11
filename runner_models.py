@@ -5,6 +5,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Dict, List
 
+from utils.em.common import POSTFLOP_M_BATCH_SIZE, PREFLOP_M_BATCH_SIZE
+
 PREFLOP_PRIOR_FLOOR = 0.01
 
 
@@ -13,8 +15,9 @@ class EMPreflopRunConfig:
     enabled: bool = False
     outer_iters: int = 5
     m_steps: int = 100
-    m_lr: float = 0.05
+    m_lr: float = 0.005
     m_l2: float = 0.25
+    m_batch_size: int = PREFLOP_M_BATCH_SIZE
 
 
 @dataclass(frozen=True)
@@ -35,6 +38,7 @@ class EMPostflopRunConfig:
     m_steps: int = 200
     m_lr: float = 0.05
     m_l2: float = 0.25
+    m_batch_size: int = POSTFLOP_M_BATCH_SIZE
     prior_floor: float = 1e-6
 
 

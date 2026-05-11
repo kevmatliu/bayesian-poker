@@ -53,6 +53,14 @@ _SPR_ONEHOT_ORDER = ("deep", "medium", "shallow")
 
 @dataclass(frozen=True)
 class StateKey:
+    """Coarse discrete context for preflop policy features (string buckets).
+
+    Each field is a **human-readable bucket name** (not numeric enums) so
+    serialized keys stay stable across Python versions and are easy to grep in
+    logs. :meth:`as_string` joins fields with ``|`` for use as dict keys and in
+    EM bundles.
+    """
+
     position: str
     active_players: str
     facing_bet: str
@@ -72,6 +80,7 @@ class StateKey:
 
     @staticmethod
     def from_string(s: str) -> StateKey:
+        """Inverse of :meth:`as_string`; raises if the string is malformed."""
         fields = ("position", "active_players", "facing_bet", "raise_count", "spr")
         parts = s.split("|")
         if len(parts) != len(fields):
@@ -80,6 +89,7 @@ class StateKey:
 
 
 def _spr_str(stack: float, pot: float) -> str:
+    """Bucket stack-to-pot ratio into ``deep`` / ``medium`` / ``shallow`` labels."""
     spr = (stack / pot) if pot > 0 else float("inf")
     if spr > 10:
         return "deep"
@@ -89,6 +99,7 @@ def _spr_str(stack: float, pot: float) -> str:
 
 
 def _active_str(n: int) -> str:
+    """Map active player count to ``heads_up`` / ``three_way`` / ``multiway``."""
     if n == 2:
         return "heads_up"
     if n == 3:
@@ -97,6 +108,7 @@ def _active_str(n: int) -> str:
 
 
 def _raise_count_str(n: int) -> str:
+    """Discretize the max raise level seen in parse betting history."""
     if n == 0:
         return "raises_0"
     if n == 1:
@@ -105,11 +117,18 @@ def _raise_count_str(n: int) -> str:
 
 
 def _seat_position(player: str, player_order: list[str]) -> str:
+    """Seat label (``sb`` … ``btn``) from 1-based seat index in ``player_order``."""
     idx = player_order.index(player) + 1
     return POSITIONS.get(idx, "unknown")
 
 
 def state_key_from_parse_state(state, player: str) -> StateKey:
+    """Derive a :class:`StateKey` from a ``parse`` snapshot at a decision index.
+
+    ``facing_bet`` is inferred from whether the player must match a non-zero
+    commitment relative to the current street's max contribution, with a
+    special case for the BB before any raises (option to check).
+    """
     num_active = sum(1 for _, alive in state.players_in_hand if alive)
     stack = state.current_stacks.get(player, 0.0)
     pot = state.pot_size
@@ -150,6 +169,7 @@ def build_state_key(
     stack: float,
     pot: float,
 ) -> StateKey:
+    """Construct a :class:`StateKey` from already-discretized quantities (tests / tooling)."""
     return StateKey(
         position=position,
         active_players=_active_str(num_active),
@@ -341,6 +361,7 @@ def _canonical_action(action_bucket: int) -> int:
 
 
 def canonical_preflop_action(action_bucket: int) -> int:
+    """Map raw parse bucket indices (including multi-size raises) to ``{FOLD,CHECK_CALL,RAISE}``."""
     return _canonical_action(action_bucket)
 
 
@@ -494,10 +515,12 @@ def train_baseline_preflop(
 
 
 def features_matrix_preflop(pairs: Sequence[Tuple[str, StateKey | str]]) -> np.ndarray:
+    """Batch :func:`preflop_feature_vector` for ``(hand_class, state_key)`` pairs → ``(N, D)``."""
     return np.stack([preflop_feature_vector(h, sk) for h, sk in pairs], axis=0)
 
 
 def fit_heuristic_preflop_prior() -> PreflopPrior:
+    """Return a :class:`PreflopPrior` with ridge-fitted heuristic ``beta`` and default ``theta``."""
     return PreflopPrior()
 
 

@@ -1,7 +1,18 @@
-"""Shared helpers for train / find_theta / test / runner pipeline entrypoints.
+"""Shared helpers for train, find_theta, tests, and runner-style pipelines.
 
-Data layout: ``pluribus/`` (or any root) contains one subdirectory per *session*; each session
-folder holds numbered ``.phh`` files, one file per *hand* in that session.
+This module is the **data plane** between parsed Pluribus ``.phh`` hands and
+the statistical objects used elsewhere:
+
+- **HandRef**: stable `(source_path, global_index, Hand)` references.
+- **flatten_hands**: resolve CLI paths (file / session / pluribus root) and
+  parse ``.phh`` in parallel.
+- **collect_*_supervised_rows**: build design matrices for population baseline
+  training when hole cards are known.
+- **gather_*_bundles_for_target_player**: build EM inputs when inferring
+  ``theta`` from observed actions and an observer's dead cards.
+
+Data layout: a *Pluribus root* (e.g. ``pluribus/``) contains one subdirectory
+per *session*; each session folder holds numbered ``.phh`` files, one per hand.
 """
 
 from __future__ import annotations
@@ -36,6 +47,7 @@ from utils.postflop_runner_bridge import (
 )
 from utils.prior.postflop import (
     FOLD,
+    PHI_DIM,
     feature_vector,
     train_baseline_facing_bet,
     train_baseline_no_bet,
@@ -88,6 +100,7 @@ def postflop_phi_column_labels() -> List[str]:
 
 
 def _verify_phi_dims() -> None:
+    """Assert label tables match compiled feature dimensions (fails fast on drift)."""
     if len(preflop_phi_column_labels()) != PREFLOP_PHI_DIM:
         raise RuntimeError("preflop_phi_column_labels length mismatch vs PREFLOP_PHI_DIM")
     from utils.prior.postflop import PHI_DIM
@@ -100,6 +113,11 @@ _verify_phi_dims()
 
 
 def hole_cards_to_hand_class(hole: str) -> Optional[str]:
+    """Map a 4-char hole string (e.g. ``AhKd``) to a 169-style label, or ``None``.
+
+    Uses :func:`utils.strength.preflop.get_equivalence_class` so suited/offsuit
+    and pairs are canonical for preflop features and EM priors.
+    """
     hole = (hole or "").strip()
     if len(hole) < 4:
         return None
@@ -112,6 +130,7 @@ def hole_cards_to_hand_class(hole: str) -> Optional[str]:
 
 
 def _numeric_name_sort_key(path: Path) -> Tuple[int, int | str]:
+    """Sort session folders numerically when the directory name is digits (``30`` before ``9``)."""
     s = path.name
     if s.isdigit():
         return (0, int(s))
@@ -189,7 +208,12 @@ def expand_data_path(
 
 @dataclass(frozen=True)
 class HandRef:
-    """One parsed hand with stable indexing for EM keys."""
+    """One parsed hand with a stable index for EM keys and logging.
+
+    ``global_index`` is the position of this hand in the flattened list
+    produced by :func:`flatten_hands` (0-based, contiguous). It is embedded in
+    supervised combo keys and bundle metadata so multiple hands never collide.
+    """
 
     source: str
     global_index: int
@@ -287,6 +311,13 @@ def split_hand_refs(
     test_frac: float,
     seed: int,
 ) -> Tuple[List[HandRef], List[HandRef], List[HandRef]]:
+    """Shuffle then partition ``HandRef`` lists into train / EM-holdout / test.
+
+    Fractions are **renormalized** by their sum so callers can pass
+    ``(0.7, 0.2, 0.1)`` or ``(70, 20, 10)`` equivalently. Allocation uses
+    integer floor sizes so every hand is assigned exactly once (no gaps when
+    ``n`` is small).
+    """
     tw = train_frac + find_theta_frac + test_frac
     if abs(tw - 1.0) > 1e-6:
         raise ValueError(f"Fractions must sum to 1.0, got {tw}")
@@ -309,7 +340,12 @@ def split_hand_refs(
 
 
 def preflop_decisions_for_hand(hand: Hand, target: str, hand_index: int):
-    """Aligned with ``runner._preflop_decisions_for_hand`` (dataclass avoided to skip runner import)."""
+    """Enumerate preflop actions taken by ``target`` with parse-time state keys.
+
+    Mirrors the runner's decision extraction so ``find_theta`` and training
+    share the same ``state_key`` strings. A lightweight nested dataclass is
+    used here to avoid importing the full runner module.
+    """
     from dataclasses import dataclass
 
     @dataclass
@@ -356,7 +392,13 @@ def collect_grouped_em_bundles_refs(
     observers: Sequence[str],
     targets: Sequence[str],
 ) -> Dict[Tuple[str, str], List[PreflopEMHandBundle]]:
-    """Same grouping semantics as ``runner`` but uses each hand's global index for EM keys."""
+    """Group preflop EM bundles by ``(observer, target)`` player-name pairs.
+
+    For each hand and each ordered pair with ``observer != target``, builds a
+    :class:`utils.em.preflop.PreflopEMHandBundle` using the observer's known
+    hole cards as **dead cards** in ``initial_class_prior``. Uses each hand's
+    ``global_index`` in decision keys (same semantics as the interactive runner).
+    """
     groups: Dict[Tuple[str, str], List[PreflopEMHandBundle]] = defaultdict(list)
     for ref in refs:
         hand = ref.hand
@@ -391,7 +433,12 @@ def pool_bundles_for_target(
 
 
 def collect_preflop_supervised_rows(refs: Sequence[HandRef]) -> Tuple[np.ndarray, np.ndarray]:
-    """Supervised rows where the acting player's hole cards are known (full 169 label)."""
+    """Build ``(X, y)`` for population preflop baseline training.
+
+    One row per ``(hand, player, preflop_decision)`` where that player's hole
+    cards map to a 169 class. ``X`` rows are :func:`utils.prior.preflop.preflop_feature_vector`
+    and ``y`` entries are canonical actions ``{FOLD, CHECK_CALL, RAISE}``.
+    """
     xs: List[np.ndarray] = []
     ys: List[int] = []
     for ref in refs:
@@ -452,13 +499,13 @@ def collect_postflop_supervised_rows(
         ):
             progress_hook("postflop_rows_progress", {"done": i + 1, "total": n})
     if not xf:
-        Xf = np.zeros((0, 13))
+        Xf = np.zeros((0, PHI_DIM))
         Yf = np.zeros((0,), dtype=int)
     else:
         Xf = np.stack(xf, axis=0)
         Yf = np.asarray(yf, dtype=int)
     if not xn:
-        Xn = np.zeros((0, 13))
+        Xn = np.zeros((0, PHI_DIM))
         Yn = np.zeros((0,), dtype=int)
     else:
         Xn = np.stack(xn, axis=0)
@@ -467,6 +514,7 @@ def collect_postflop_supervised_rows(
 
 
 def dump_json(path: Path, payload: object) -> Path:
+    """Write ``payload`` as pretty-printed JSON; create parent dirs as needed."""
     path = path.expanduser().resolve()
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
@@ -474,6 +522,7 @@ def dump_json(path: Path, payload: object) -> Path:
 
 
 def load_json(path: Path) -> object:
+    """Load JSON from disk into native Python types (no schema validation)."""
     return json.loads(Path(path).expanduser().resolve().read_text(encoding="utf-8"))
 
 

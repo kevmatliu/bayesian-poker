@@ -16,6 +16,7 @@ from test import evaluate_split
 from train import train_global_priors
 
 from runner_execute import LOG
+from utils.em.common import POSTFLOP_M_BATCH_SIZE, PREFLOP_M_BATCH_SIZE
 
 REPO_ROOT = Path(__file__).resolve().parent
 
@@ -134,7 +135,8 @@ def pipeline_main(argv: Optional[List[str]] = None) -> int:
         type=Path,
         default=None,
         help=(
-            "Directory for EM jsonl traces during learn_player_thetas (flushed per record). "
+            "Directory for EM jsonl traces during learn_player_thetas (flushed per record); "
+            "each record is also logged as 'EM history jsonl | …'. "
             "Default: <parent of --player-thetas-out>/em_history"
         ),
     )
@@ -152,8 +154,20 @@ def pipeline_main(argv: Optional[List[str]] = None) -> int:
     )
     parser.add_argument("--preflop-theta-em-iters", type=int, default=4)
     parser.add_argument("--preflop-theta-m-steps", type=int, default=80)
+    parser.add_argument(
+        "--preflop-theta-m-batch-size",
+        type=int,
+        default=PREFLOP_M_BATCH_SIZE,
+        help="Preflop M-step minibatch size (bundles per grad step). 0 = full-batch.",
+    )
     parser.add_argument("--postflop-theta-em-iters", type=int, default=4)
     parser.add_argument("--postflop-theta-m-steps", type=int, default=80)
+    parser.add_argument(
+        "--postflop-theta-m-batch-size",
+        type=int,
+        default=POSTFLOP_M_BATCH_SIZE,
+        help="Postflop M-step minibatch size (hands per grad step). 0 = full-batch.",
+    )
     parser.add_argument(
         "--parse-workers",
         type=int,
@@ -267,20 +281,27 @@ def pipeline_main(argv: Optional[List[str]] = None) -> int:
             n_theta_hands=len(theta_refs),
             preflop_theta_em_iters=args.preflop_theta_em_iters,
             preflop_theta_m_steps=args.preflop_theta_m_steps,
+            preflop_theta_m_batch_size=args.preflop_theta_m_batch_size,
             postflop_theta_em_iters=args.postflop_theta_em_iters,
             postflop_theta_m_steps=args.postflop_theta_m_steps,
+            postflop_theta_m_batch_size=args.postflop_theta_m_batch_size,
             warm_start_theta=args.warm_start_theta,
             em_history_dir=str(em_history_resolved.resolve()),
         )
-        LOG.info("EM jsonl traces → %s", em_history_resolved.resolve())
+        LOG.info(
+            "EM history jsonl → %s (find_theta also mirrors each line to logs as 'EM history jsonl | …')",
+            em_history_resolved.resolve(),
+        )
         thetas_payload = learn_player_thetas(
             refs=theta_refs,
             global_priors_path=args.global_priors_out,
             warm_start_path=args.warm_start_theta,
             preflop_em_iters=args.preflop_theta_em_iters,
             preflop_m_steps=args.preflop_theta_m_steps,
+            preflop_m_batch_size=args.preflop_theta_m_batch_size,
             postflop_em_iters=args.postflop_theta_em_iters,
             postflop_m_steps=args.postflop_theta_m_steps,
+            postflop_m_batch_size=args.postflop_theta_m_batch_size,
             em_history_dir=em_history_resolved,
         )
         players_block = thetas_payload.get("players") or {}

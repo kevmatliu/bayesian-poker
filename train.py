@@ -145,6 +145,36 @@ def train_global_priors(
     postflop_l2: float = 0.0,
     postflop_equity_mc: int = 8,
 ) -> Dict[str, Any]:
+    """Fit population-level ``beta`` weights and return a JSON-serializable payload.
+
+    Pipeline:
+
+    1. **Load** — Either use ``refs`` directly or call :func:`pipeline_common.flatten_hands`
+       on ``inputs`` with optional session filters.
+    2. **Supervised rows** — :func:`pipeline_common.collect_preflop_supervised_rows`
+       and :func:`pipeline_common.collect_postflop_supervised_rows` (known hole
+       cards only). Postflop equity features use ``postflop_equity_mc`` Monte
+       Carlo samples on the flop for speed.
+    3. **Fit** — Multinomial logit for preflop (3-way) and two postflop heads
+       (facing bet: 3-way; no bet: 2-way). If a partition has zero rows, the
+       corresponding ``beta`` falls back to built-in heuristics from
+       :class:`utils.prior.preflop.PreflopPrior` / :class:`utils.prior.postflop.PostflopPrior`.
+
+    Args:
+        inputs: Paths to ``.phh`` files, session dirs, or pluribus roots (ignored if ``refs`` given).
+        refs: Pre-parsed hands; skips disk load when callers already flattened.
+        session_names: If set, only session subfolders whose **directory name**
+            is in this set are loaded under each pluribus root.
+        max_sessions: Cap sessions per root after numeric sort.
+        preflop_lr, preflop_epochs, preflop_l2: Baseline SGD hyperparameters for preflop.
+        postflop_lr, postflop_epochs, postflop_l2: Same for **both** postflop heads.
+        postflop_equity_mc: Flop rollout MC sample count when building postflop rows.
+
+    Returns:
+        Dict with ``schema``, ``hands_used``, optional ``session_filter`` /
+        ``max_sessions``, ``preflop`` block (``beta_preflop``, labels, sample counts),
+        and ``postflop`` block (``beta_facing``, ``beta_no_bet``, ``phi_dim``, etc.).
+    """
     if refs is None:
         if not inputs:
             raise ValueError("train_global_priors needs inputs or refs")
@@ -312,6 +342,7 @@ def train_global_priors(
 
 
 def main(argv: List[str] | None = None) -> int:
+    """CLI entry: parse args, configure logging, run :func:`train_global_priors`, write JSON."""
     args = build_parser().parse_args(argv)
     logging.basicConfig(
         level=getattr(logging, args.log_level),

@@ -182,6 +182,11 @@ def feature_vector(features: PostflopFeatures) -> np.ndarray:
 
 
 def legal_actions(features: PostflopFeatures) -> Tuple[int, ...]:
+    """Return the ordered legal action indices for ``features.facing_bet``.
+
+    When not facing a bet, **fold is illegal** (caller should not emit fold
+    labels in the no-bet training head). Facing a bet uses the full 3-way set.
+    """
     if features.facing_bet:
         return (FOLD, CALL, RAISE)
     return (CALL, RAISE)
@@ -220,6 +225,7 @@ def _floor_row_probs(
 
 
 def _softmax_dict(scores: Mapping[int, float]) -> Dict[int, float]:
+    """Stable softmax over an arbitrary finite action set keyed by ``int``."""
     if not scores:
         raise ValueError("empty scores")
     actions = list(scores.keys())
@@ -231,6 +237,7 @@ def _softmax_dict(scores: Mapping[int, float]) -> Dict[int, float]:
 
 
 def _softmax_log_probs(log_p: Mapping[int, float], floor_log: float = -1e300) -> Dict[int, float]:
+    """Softmax treating inputs as **log** scores, with a floor to avoid ``-inf``."""
     scores = {a: max(float(v), floor_log) for a, v in log_p.items()}
     return _softmax_dict(scores)
 
@@ -467,6 +474,7 @@ class PostflopPrior:
 
 
 def _validate_beta_shape(arr: np.ndarray, shape: Tuple[int, int], name: str) -> None:
+    """Raise ``ValueError`` if ``arr`` is not exactly ``shape`` (used by loaders/tests)."""
     a = np.asarray(arr, dtype=float)
     if a.shape != shape:
         raise ValueError(f"{name} must have shape {shape}, got {a.shape}")
@@ -546,8 +554,10 @@ def train_baseline_no_bet(
 
 
 def features_matrix(rows: Iterable[PostflopFeatures]) -> np.ndarray:
+    """Stack :func:`feature_vector` for many feature rows → ``(N, PHI_DIM)``."""
     return np.stack([feature_vector(f) for f in rows], axis=0)
 
 
 def fit_heuristic_postflop_prior() -> PostflopPrior:
+    """Return a :class:`PostflopPrior` with default heuristic ``beta`` and zero ``theta``."""
     return PostflopPrior()

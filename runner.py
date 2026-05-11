@@ -21,7 +21,9 @@ for path in (str(UTILS_DIR), str(REPO_ROOT)):
 
 from runner_execute import dump_result_json, run_preflop_filter
 from runner_models import EMPostflopRunConfig, EMPreflopRunConfig
+from utils.em.common import POSTFLOP_M_BATCH_SIZE, PREFLOP_M_BATCH_SIZE
 from runner_pipeline import pipeline_main
+from runner_filter_sessions import filter_sessions_main
 from runner_session_split import session_split_main
 
 LOG = logging.getLogger("runner")
@@ -67,8 +69,14 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--em-iters", type=int, default=5, help="Outer EM iterations (E / M cycles).")
     parser.add_argument("--em-m-steps", type=int, default=100, help="Gradient steps in each M-step.")
-    parser.add_argument("--em-lr", type=float, default=0.05, help="M-step learning rate.")
+    parser.add_argument("--em-lr", type=float, default=0.005, help="Preflop M-step learning rate.")
     parser.add_argument("--em-l2", type=float, default=0.25, help="L2 penalty on theta_pre in the M-step.")
+    parser.add_argument(
+        "--em-m-batch-size",
+        type=int,
+        default=PREFLOP_M_BATCH_SIZE,
+        help="Preflop M-step minibatch size (bundles per gradient step). Use 0 for full-batch.",
+    )
     parser.add_argument(
         "--em-postflop",
         action="store_true",
@@ -81,6 +89,12 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         help="Outer EM iterations for post-flop theta_post.",
     )
     parser.add_argument("--postflop-m-steps", type=int, default=200, help="Gradient steps per post-flop M-step.")
+    parser.add_argument(
+        "--postflop-em-m-batch-size",
+        type=int,
+        default=POSTFLOP_M_BATCH_SIZE,
+        help="Post-flop M-step minibatch size (hands per gradient step). Use 0 for full-batch.",
+    )
     parser.add_argument("--postflop-em-lr", type=float, default=0.05, help="Learning rate for post-flop M-step.")
     parser.add_argument("--postflop-em-l2", type=float, default=0.25, help="L2 penalty on post-flop theta_post.")
     parser.add_argument(
@@ -118,6 +132,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         m_steps=args.em_m_steps,
         m_lr=args.em_lr,
         m_l2=args.em_l2,
+        m_batch_size=args.em_m_batch_size,
     )
     postflop_em_cfg = EMPostflopRunConfig(
         enabled=args.em_postflop,
@@ -126,6 +141,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         m_lr=args.postflop_em_lr,
         m_l2=args.postflop_em_l2,
         prior_floor=args.postflop_prior_floor,
+        m_batch_size=args.postflop_em_m_batch_size,
     )
     result = run_preflop_filter(
         source_path=args.session_path,
@@ -197,6 +213,8 @@ if __name__ == "__main__":
         raise SystemExit(pipeline_main(sys.argv[2:]))
     if len(sys.argv) > 1 and sys.argv[1] == "session-split":
         raise SystemExit(session_split_main(sys.argv[2:]))
+    if len(sys.argv) > 1 and sys.argv[1] == "filter-sessions":
+        raise SystemExit(filter_sessions_main(sys.argv[2:]))
     raise SystemExit(main())
 
 
@@ -205,6 +223,7 @@ __all__ = [
     "EMPostflopRunConfig",
     "EMPreflopRunConfig",
     "dump_result_json",
+    "filter_sessions_main",
     "main",
     "pipeline_main",
     "run_preflop_filter",

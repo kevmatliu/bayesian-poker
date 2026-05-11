@@ -143,6 +143,7 @@ def _run_preflop_em_per_pair(
             m_l2=em_cfg.m_l2,
             m_lr=em_cfg.m_lr,
             m_steps=em_cfg.m_steps,
+            m_batch_size=em_cfg.m_batch_size,
         )
         out[pair_label] = [float(x) for x in theta]
         LOG.info(
@@ -180,6 +181,7 @@ def _run_postflop_em_per_pair(
             m_lr=pf_cfg.m_lr,
             m_steps=pf_cfg.m_steps,
             m_l2=pf_cfg.m_l2,
+            m_batch_size=pf_cfg.m_batch_size,
         )
         theta_out[pair_label] = [float(x) for x in theta]
         counts[pair_label] = n_hands

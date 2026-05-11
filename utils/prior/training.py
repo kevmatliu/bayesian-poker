@@ -1,4 +1,15 @@
-"""Multinomial logistic regression for population baseline policies (no player id)."""
+"""Multinomial logistic regression for population baseline policies (no player id).
+
+Each routine implements full-batch gradient descent on the softmax
+cross-entropy. Gradients are the classic ``p - one_hot(y)`` form multiplied
+by ``X[i]`` and averaged over ``n``. This is simple and robust for moderate
+``n``; there is no line search—``learning_rate`` and ``max_epochs`` should
+be set for the corpus size (``train.py`` defaults are a reasonable starting point).
+
+L2 penalty (if ``l2 > 0``) is added **on the gradient** as ``l2 * beta``,
+i.e. weight decay toward zero, matching the usual MAP interpretation with a
+Gaussian prior on weights.
+"""
 
 from __future__ import annotations
 
@@ -17,7 +28,24 @@ def train_multinomial_3_class(
     tol: float = 1e-7,
     l2: float = 0.0,
 ) -> np.ndarray:
-    """Fit beta (3, D) for labels in {0, 1, 2}."""
+    """Fit a ``(3, feature_dim)`` weight matrix for 3-class softmax regression.
+
+    Rows of ``beta`` correspond to class logits; there is no separate bias row
+    beyond whatever bias column exists inside ``X`` (callers include a constant
+    ``1.0`` in ``phi``).
+
+    Args:
+        X: Design matrix ``(n_samples, feature_dim)``.
+        y: Integer labels in ``{0, 1, 2}``.
+        feature_dim: Expected second dimension of ``X`` (explicit for validation).
+        learning_rate: Fixed step size for gradient descent.
+        max_epochs: Maximum full passes over the dataset.
+        tol: Stop when the Frobenius norm of the average gradient falls below this.
+        l2: Coefficient for L2 weight decay (applied to ``beta`` on the gradient).
+
+    Returns:
+        ``beta`` with shape ``(3, feature_dim)``.
+    """
     X = np.asarray(X, dtype=float)
     y = np.asarray(y, dtype=int)
     if X.ndim != 2 or X.shape[1] != feature_dim:
@@ -58,7 +86,25 @@ def train_multinomial_2_class(
     tol: float = 1e-7,
     l2: float = 0.0,
 ) -> np.ndarray:
-    """Fit beta (2, D); y values must be label_a or label_b (mapped to rows 0 and 1)."""
+    """Fit a ``(2, feature_dim)`` weight matrix for binary softmax regression.
+
+    Used for postflop **no-bet** decisions where legal actions are only
+    ``label_a`` and ``label_b`` (typically call vs raise). Externally those
+    may be encoded as indices ``1`` and ``2`` to align with the 3-action enum;
+    here they are mapped to internal rows ``0`` and ``1``.
+
+    Args:
+        X: Design matrix ``(n_samples, feature_dim)``.
+        y: Labels, each equal to ``label_a`` or ``label_b``.
+        feature_dim: Expected second dimension of ``X``.
+        label_a: External integer label mapped to softmax row 0.
+        label_b: External integer label mapped to softmax row 1.
+        learning_rate, max_epochs, tol, l2: Same semantics as
+            :func:`train_multinomial_3_class`.
+
+    Returns:
+        ``beta`` with shape ``(2, feature_dim)``.
+    """
     X = np.asarray(X, dtype=float)
     y = np.asarray(y, dtype=int)
     if X.ndim != 2 or X.shape[1] != feature_dim:

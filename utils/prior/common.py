@@ -1,4 +1,10 @@
-"""Shared utilities for multi-class action priors (preflop & postflop)."""
+"""Shared utilities for multi-class action priors (preflop & postflop).
+
+Contains softmax helpers, the small **utility vector** type used in tendency
+tilting, and :class:`PriorMode` for dispatch. Postflop and preflop priors both
+use ``theta`` in ``R^3`` paired with 3-vectors ``u(a)`` so the same dot product
+structure applies (fold / passive / aggressive semantics).
+"""
 
 from __future__ import annotations
 
@@ -63,11 +69,18 @@ def softmax_log_probs_dict(log_p: Mapping[int, float], floor_log: float = -1e300
 
 
 def dot3(theta: Sequence[float], u: UtilityVector) -> float:
+    """Inner product ``theta · u`` for length-3 tendency vectors."""
     return theta[0] * u[0] + theta[1] * u[1] + theta[2] * u[2]
 
 
 def tendency_deviation_vector(candidate_action: int, p_base: Mapping[int, float], *, fold: int, call: int, raise_: int) -> UtilityVector:
-    """u_k = 1[a=k] - P_base(k)."""
+    """Centered one-hot **utility** for tendency tilting: ``u_k = 1[a=k] - P_base(k)``.
+
+    Subtracting the baseline expectation keeps the mapping identifiable up to
+    an additive constant in each coordinate; softmax is invariant to that
+    constant, but centering improves numerical behavior when combining with
+    ``log p_base`` in :class:`utils.prior.preflop.PreflopPrior`.
+    """
     return (
         float(candidate_action == fold) - float(p_base[fold]),
         float(candidate_action == call) - float(p_base[call]),
@@ -76,6 +89,7 @@ def tendency_deviation_vector(candidate_action: int, p_base: Mapping[int, float]
 
 
 def softmax_vec(logits: np.ndarray) -> np.ndarray:
+    """Numerically stable softmax for a 1-D logits vector (subtract max before exp)."""
     m = float(np.max(logits))
     e = np.exp(logits - m)
     return e / float(np.sum(e))

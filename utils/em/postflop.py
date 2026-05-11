@@ -10,7 +10,11 @@ from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple
 
 import numpy as np
 
-from utils.em.common import M_STEP_GRAD_NORM_TOL, normalize_log_weights
+from utils.em.common import (
+    M_STEP_GRAD_NORM_TOL,
+    POSTFLOP_M_BATCH_SIZE,
+    normalize_log_weights,
+)
 from utils.prior.postflop import PostflopFeatures, PostflopPrior
 
 LOG = logging.getLogger(__name__)
@@ -138,6 +142,8 @@ def postflop_theta_gradient_bundles(
     q_by_hand: Sequence[Mapping[str, float]],
     *,
     l2: float = 0.25,
+    bundle_indices: Optional[Sequence[int]] = None,
+    apply_l2: bool = True,
 ) -> np.ndarray:
     """Batched M-step gradient.
 
@@ -147,6 +153,10 @@ def postflop_theta_gradient_bundles(
     contribution simplifies to ``w * (e_action - p_theta)`` after
     cancelling the ``-E_p[u]`` drift term across actions, so we can
     accumulate it with a single weighted sum per row (Method D).
+
+    When ``bundle_indices`` is set, only those hand-bundle indices contribute
+    (for minibatch M-step); use ``apply_l2=False`` and apply L2 outside when
+    scaling stochastic gradients.
     """
     from utils.prior.postflop import feature_vector
 
@@ -154,7 +164,14 @@ def postflop_theta_gradient_bundles(
     theta_vec = prior_template.theta_vec
     eye = np.eye(3, dtype=float)
 
-    for bundle, qmap in zip(bundles, q_by_hand):
+    if bundle_indices is None:
+        index_iter = range(len(bundles))
+    else:
+        index_iter = bundle_indices
+
+    for bi in index_iter:
+        bundle = bundles[int(bi)]
+        qmap = q_by_hand[int(bi)]
         if not qmap:
             continue
         for step in bundle.decisions:
@@ -183,7 +200,8 @@ def postflop_theta_gradient_bundles(
             diff = eye[action][None, :] - p_theta  # (N, 3)
             grad += (weights[:, None] * diff).sum(axis=0)
 
-    grad -= l2 * theta_vec
+    if apply_l2:
+        grad -= l2 * theta_vec
     return grad
 
 
@@ -244,11 +262,22 @@ def m_step_theta_post_gradient_ascent_bundles(
     outer_1based: int = 1,
     num_outer_iterations: int = 1,
     grad_norm_tol: float = M_STEP_GRAD_NORM_TOL,
+    m_batch_size: int = POSTFLOP_M_BATCH_SIZE,
+    m_step_seed: Optional[int] = None,
 ) -> Tuple[np.ndarray, int]:
     theta = np.asarray(theta_init, dtype=float).copy()
     log_every = max(1, steps // 10)
     t_m0 = time.perf_counter()
     used = steps
+
+    n_hands = len(bundles)
+    rng = np.random.default_rng(m_step_seed)
+    if m_batch_size <= 0 or m_batch_size >= n_hands:
+        bundle_batch_cap = n_hands
+        use_minibatch = False
+    else:
+        bundle_batch_cap = int(m_batch_size)
+        use_minibatch = True
 
     for step_i in range(steps):
         live = PostflopPrior(
@@ -257,7 +286,21 @@ def m_step_theta_post_gradient_ascent_bundles(
             beta_facing=prior_template.beta_facing_matrix,
             beta_no_bet=prior_template.beta_no_bet_matrix,
         )
-        g = postflop_theta_gradient_bundles(live, bundles, q_by_hand, l2=l2)
+        if use_minibatch:
+            bsz = min(bundle_batch_cap, n_hands)
+            batch_ix = rng.choice(n_hands, size=bsz, replace=False)
+            scale = n_hands / float(bsz)
+            g_data = postflop_theta_gradient_bundles(
+                live,
+                bundles,
+                q_by_hand,
+                l2=l2,
+                bundle_indices=batch_ix,
+                apply_l2=False,
+            )
+            g = scale * g_data - l2 * live.theta_vec
+        else:
+            g = postflop_theta_gradient_bundles(live, bundles, q_by_hand, l2=l2)
         gn = float(np.linalg.norm(g))
         if gn < grad_norm_tol:
             used = step_i + 1
@@ -310,10 +353,24 @@ def run_postflop_theta_em(
     m_steps: int = 200,
     m_l2: float = 0.25,
     clip: float = 3.0,
+    m_batch_size: int = POSTFLOP_M_BATCH_SIZE,
+    m_step_seed: Optional[int] = None,
     m_grad_norm_tol: float = M_STEP_GRAD_NORM_TOL,
     history_hook: Optional[Callable[[Dict[str, Any]], None]] = None,
     hand_meta: Optional[Sequence[Mapping[str, Any]]] = None,
 ) -> Tuple[np.ndarray, List[Dict[str, float]]]:
+    """Outer EM for postflop tendency ``theta_post`` with frozen ``beta`` matrices.
+
+    For each outer iteration: E-step per hand-bundle via
+    :func:`e_step_postflop_bundle` (batched combo likelihoods), then M-step via
+    :func:`m_step_theta_post_gradient_ascent_bundles`. ``history_hook`` can
+    record per-hand ESS / max ``q`` for diagnostics; large runs subsample
+    ``postflop_e_step`` events to limit disk IO.
+
+    Returns:
+        Tuple of ``(theta_post array shape (3,), list of per-hand posterior dicts
+        from the final outer iteration)``.
+    """
     theta = (
         np.zeros(3, dtype=float)
         if theta_init is None
@@ -345,6 +402,7 @@ def run_postflop_theta_em(
                     "m_steps": m_steps,
                     "m_lr": m_lr,
                     "m_l2": m_l2,
+                    "m_batch_size": int(m_batch_size),
                     "theta_post": [float(x) for x in theta],
                 }
             )
@@ -433,11 +491,18 @@ def run_postflop_theta_em(
             beta_no_bet=beta_no_bet,
         )
 
+        nh_m = len(bundles_list)
+        mb_eff = (
+            "full"
+            if m_batch_size <= 0 or m_batch_size >= nh_m
+            else f"{min(m_batch_size, nh_m)}/{nh_m} hands/step"
+        )
         LOG.info(
-            "Postflop EM M-step start | outer %d/%d | %d gradient steps",
+            "Postflop EM M-step start | outer %d/%d | %d gradient steps | batch=%s",
             outer + 1,
             num_em_iters,
             m_steps,
+            mb_eff,
         )
         theta, post_m_used = m_step_theta_post_gradient_ascent_bundles(
             base_prior,
@@ -452,6 +517,8 @@ def run_postflop_theta_em(
             outer_1based=outer + 1,
             num_outer_iterations=num_em_iters,
             grad_norm_tol=m_grad_norm_tol,
+            m_batch_size=m_batch_size,
+            m_step_seed=m_step_seed,
         )
 
         if history_hook is not None:
@@ -464,6 +531,7 @@ def run_postflop_theta_em(
                     "n_hands": len(bundles_list),
                     "m_gradient_steps_used": post_m_used,
                     "m_gradient_steps_cap": m_steps,
+                    "m_batch_size": int(m_batch_size),
                     "outer_wall_s": round(time.perf_counter() - t0, 4),
                 }
             )
@@ -489,6 +557,12 @@ def single_hand_em_gradient_sample(
     *,
     prior_floor: float = 0.0,
 ) -> np.ndarray:
+    """Debug helper: M-step gradient for ``theta_post`` assuming **uniform** ``q`` over combos.
+
+    Wraps :func:`postflop_theta_gradient` with synthetic equal weights. Not
+    used in production EM (which uses :func:`e_step_combo_posterior` /
+    :func:`e_step_postflop_bundle`), but handy for sanity checks.
+    """
     hands = [list(observations)]
     n = len(observations)
     if n == 0:

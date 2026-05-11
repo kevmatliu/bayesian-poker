@@ -1,5 +1,11 @@
 #!/usr/bin/env python3
-"""Learn per-player theta vectors (preflop + postflop) given frozen global baselines."""
+"""Learn per-player ``theta`` vectors (preflop + postflop) from frozen global ``beta``.
+
+Loads ``artifacts/global_priors.json`` (or any path) produced by ``train.py``,
+builds EM bundles per target player via :mod:`pipeline_common`, and runs
+:func:`utils.em.preflop.run_preflop_em` plus :func:`utils.em.postflop.run_postflop_theta_em`.
+Supports bilateral ``--em-pair`` mode (each player uses only the other as observer).
+"""
 
 from __future__ import annotations
 
@@ -22,10 +28,161 @@ from pipeline_common import (
     gather_postflop_bundles_for_target_player,
     gather_preflop_bundles_for_target_player,
     load_json,
+    read_session_names_file,
 )
 from utils.em import run_postflop_theta_em, run_preflop_em
+from utils.em.common import POSTFLOP_M_BATCH_SIZE, PREFLOP_M_BATCH_SIZE
 
 LOG = logging.getLogger("find_theta")
+
+
+def _mirror_em_history_jsonl_record(rec: Mapping[str, Any]) -> None:
+    """Echo each EM jsonl record to the logger (matches ``history_hook`` payloads).
+
+    High-frequency ``preflop_e_step`` / ``postflop_e_step`` lines use DEBUG; other
+    kinds use INFO so normal runs show outer iterations and M-steps without spam.
+    """
+    kind = rec.get("kind")
+    tgt = rec.get("theta_target") or rec.get("player")
+
+    def _outer_1based(em_outer: Any) -> str:
+        if em_outer is None:
+            return "?"
+        return str(int(em_outer) + 1)
+
+    if kind == "preflop_e_step":
+        LOG.debug(
+            "EM history jsonl | preflop_e_step | target=%s | outer_iter=%s | bundle_index=%s | "
+            "ess=%.4f | max_q=%s | stride=%s | session=%s hand=%s phh=%s",
+            tgt,
+            _outer_1based(rec.get("em_outer")),
+            rec.get("bundle_index"),
+            float(rec.get("ess") or 0.0),
+            rec.get("max_q"),
+            rec.get("e_step_subsample_stride"),
+            rec.get("session"),
+            rec.get("hand_number"),
+            rec.get("phh"),
+        )
+        return
+    if kind == "postflop_e_step":
+        LOG.debug(
+            "EM history jsonl | postflop_e_step | target=%s | outer_iter=%s | hand_index_in_batch=%s | "
+            "ess=%.4f | max_q=%s | stride=%s | session=%s hand=%s",
+            tgt,
+            _outer_1based(rec.get("em_outer")),
+            rec.get("hand_index_in_batch"),
+            float(rec.get("ess") or 0.0),
+            rec.get("max_q"),
+            rec.get("e_step_subsample_stride"),
+            rec.get("session"),
+            rec.get("hand_number"),
+        )
+        return
+    if kind == "em_player_segment_start":
+        LOG.info(
+            "EM history jsonl | em_player_segment_start | target=%s | note=%s",
+            tgt,
+            rec.get("note", ""),
+        )
+        return
+    if kind == "em_player_segment_end":
+        LOG.info(
+            "EM history jsonl | em_player_segment_end | target=%s | note=%s",
+            tgt,
+            rec.get("note", ""),
+        )
+        return
+    if kind == "preflop_em_outer_start":
+        LOG.info(
+            "EM history jsonl | preflop_em_outer_start | target=%s | outer=%s/%s | n_bundles=%s",
+            tgt,
+            _outer_1based(rec.get("em_outer")),
+            rec.get("num_em_iters"),
+            rec.get("n_bundles"),
+        )
+        return
+    if kind == "preflop_e_step_finished":
+        LOG.info(
+            "EM history jsonl | preflop_e_step_finished | target=%s | outer_iter=%s | "
+            "max_q_any_bundle=%s | stride=%s | n_bundles=%s",
+            tgt,
+            _outer_1based(rec.get("em_outer")),
+            rec.get("max_q_any_bundle"),
+            rec.get("e_step_subsample_stride"),
+            rec.get("n_bundles"),
+        )
+        return
+    if kind == "preflop_m_step_start":
+        LOG.info(
+            "EM history jsonl | preflop_m_step_start | target=%s | outer_iter=%s | "
+            "m_steps=%s | lr=%s | l2=%s | m_batch_size=%s | n_bundles=%s",
+            tgt,
+            _outer_1based(rec.get("em_outer")),
+            rec.get("m_steps"),
+            rec.get("m_lr"),
+            rec.get("m_l2"),
+            rec.get("m_batch_size"),
+            rec.get("n_bundles"),
+        )
+        return
+    if kind == "preflop_m_step":
+        tp = rec.get("theta_pre")
+        LOG.info(
+            "EM history jsonl | preflop_m_step | target=%s | outer_iter=%s | "
+            "theta_pre=%s | m_grad_iters=%s/%s | m_batch_size=%s | n_bundles=%s",
+            tgt,
+            _outer_1based(rec.get("em_outer")),
+            tp,
+            rec.get("m_gradient_steps_used"),
+            rec.get("m_gradient_steps_cap"),
+            rec.get("m_batch_size"),
+            rec.get("n_bundles"),
+        )
+        return
+    if kind == "postflop_em_outer_start":
+        LOG.info(
+            "EM history jsonl | postflop_em_outer_start | target=%s | outer=%s/%s | "
+            "n_hands=%s | m_steps=%s | lr=%s | l2=%s | m_batch_size=%s | theta_post=%s",
+            tgt,
+            _outer_1based(rec.get("em_outer")),
+            rec.get("num_em_iters"),
+            rec.get("n_hands"),
+            rec.get("m_steps"),
+            rec.get("m_lr"),
+            rec.get("m_l2"),
+            rec.get("m_batch_size"),
+            rec.get("theta_post"),
+        )
+        return
+    if kind == "postflop_e_step_finished":
+        LOG.info(
+            "EM history jsonl | postflop_e_step_finished | target=%s | outer_iter=%s | "
+            "n_hands=%s | max_ess=%s | e_step_wall_s=%s | stride=%s",
+            tgt,
+            _outer_1based(rec.get("em_outer")),
+            rec.get("n_hands"),
+            rec.get("max_ess"),
+            rec.get("e_step_wall_s"),
+            rec.get("e_step_subsample_stride"),
+        )
+        return
+    if kind == "postflop_m_step":
+        LOG.info(
+            "EM history jsonl | postflop_m_step | target=%s | outer_iter=%s | theta_post=%s | "
+            "m_grad_iters=%s/%s | m_batch_size=%s | n_hands=%s | outer_wall_s=%s",
+            tgt,
+            _outer_1based(rec.get("em_outer")),
+            rec.get("theta_post"),
+            rec.get("m_gradient_steps_used"),
+            rec.get("m_gradient_steps_cap"),
+            rec.get("m_batch_size"),
+            rec.get("n_hands"),
+            rec.get("outer_wall_s"),
+        )
+        return
+
+    LOG.debug("EM history jsonl | %s | %s", kind, json.dumps(rec, default=str))
 
 
 def _log_preflop_bundle_composition(target: str, metas: List[Dict[str, Any]]) -> None:
@@ -165,13 +322,25 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--preflop-floor", type=float, default=0.01)
     p.add_argument("--preflop-em-iters", type=int, default=5)
     p.add_argument("--preflop-m-steps", type=int, default=100)
-    p.add_argument("--preflop-m-lr", type=float, default=0.05)
+    p.add_argument("--preflop-m-lr", type=float, default=0.005)
     p.add_argument("--preflop-m-l2", type=float, default=0.25)
+    p.add_argument(
+        "--preflop-m-batch-size",
+        type=int,
+        default=PREFLOP_M_BATCH_SIZE,
+        help="Preflop M-step minibatch size (bundles per grad step). 0 = full-batch.",
+    )
     p.add_argument("--postflop-floor", type=float, default=1e-6)
     p.add_argument("--postflop-em-iters", type=int, default=10)
     p.add_argument("--postflop-m-steps", type=int, default=200)
     p.add_argument("--postflop-m-lr", type=float, default=0.05)
     p.add_argument("--postflop-m-l2", type=float, default=0.25)
+    p.add_argument(
+        "--postflop-m-batch-size",
+        type=int,
+        default=POSTFLOP_M_BATCH_SIZE,
+        help="Postflop M-step minibatch size (hands per grad step). 0 = full-batch.",
+    )
     p.add_argument("--postflop-clip", type=float, default=3.0)
     p.add_argument(
         "--em-history-dir",
@@ -179,7 +348,8 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help=(
             "Directory for EM jsonl traces (one file per target player or bilateral pair). "
-            "Each line is flushed immediately. Default when omitted: no jsonl (use INFO logs for progress)."
+            "Each line is flushed immediately; the same record is echoed to the logger with "
+            "prefix 'EM history jsonl' (per-bundle e_step at DEBUG). Default: omit = no jsonl file."
         ),
     )
     p.add_argument(
@@ -195,11 +365,22 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Max session subfolders per Pluribus root (after numeric sort).",
     )
+    p.add_argument(
+        "--sessions-file",
+        type=Path,
+        default=None,
+        metavar="PATH",
+        help=(
+            "Same as --session but read names from a text file: one session directory per line, "
+            "ignore blank lines and # comments. Merged with repeated --session (order preserved, deduped)."
+        ),
+    )
     p.add_argument("--log-level", default="INFO", choices=("DEBUG", "INFO", "WARNING", "ERROR"))
     return p
 
 
 def load_global_priors(path: Path) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Read ``beta_preflop``, ``beta_facing``, ``beta_no_bet`` arrays from a global priors JSON file."""
     raw = load_json(path)
     if not isinstance(raw, dict):
         raise ValueError("global priors JSON must be an object")
@@ -212,6 +393,7 @@ def load_global_priors(path: Path) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
 
 
 def discover_players(refs: Sequence) -> List[str]:
+    """Return sorted unique ``player_names`` appearing across all loaded ``HandRef`` objects."""
     names = set()
     for ref in refs:
         for p in ref.hand.player_names:
@@ -231,19 +413,30 @@ def learn_player_thetas(
     preflop_floor: float = 0.01,
     preflop_em_iters: int = 5,
     preflop_m_steps: int = 100,
-    preflop_m_lr: float = 0.05,
+    preflop_m_lr: float = 0.005,
     preflop_m_l2: float = 0.25,
+    preflop_m_batch_size: int = PREFLOP_M_BATCH_SIZE,
     postflop_floor: float = 1e-6,
     postflop_em_iters: int = 10,
     postflop_m_steps: int = 200,
     postflop_m_lr: float = 0.05,
     postflop_m_l2: float = 0.25,
+    postflop_m_batch_size: int = POSTFLOP_M_BATCH_SIZE,
     postflop_clip: float = 3.0,
     em_history_dir: Optional[Path] = None,
     restrict_preflop_observers: Optional[Sequence[str]] = None,
     postflop_require_observer: Optional[str] = None,
     em_pair: Optional[Tuple[str, str]] = None,
 ) -> Dict[str, Any]:
+    """Run preflop + postflop EM for each requested player; return a JSON-serializable report.
+
+    Steps per player: gather preflop bundles (observer dead cards → 169 prior),
+    :func:`run_preflop_em`; gather postflop combo bundles, :func:`run_postflop_theta_em`;
+    merge results into ``players_out[player]`` with ``theta_pre``, ``theta_post``,
+    diagnostics, and optional EM jsonl via ``em_history_dir``.
+
+    ``warm_start_path`` may seed ``theta`` from a prior ``player_thetas.json``.
+    """
     if global_priors_path is None:
         raise ValueError("global_priors_path is required")
     beta_preflop, beta_facing, beta_no_bet = load_global_priors(global_priors_path)
@@ -276,6 +469,13 @@ def learn_player_thetas(
     em_hist_root: Optional[Path] = (
         Path(em_history_dir).expanduser().resolve() if em_history_dir is not None else None
     )
+    if em_hist_root is not None:
+        LOG.info(
+            "EM history jsonl | enabled | directory=%s | one .jsonl per target player; "
+            "each written record is echoed below with prefix 'EM history jsonl' "
+            "(per-hand e_step details at DEBUG)",
+            em_hist_root,
+        )
 
     warm: MutableMapping[str, Mapping[str, Any]] = {}
     if warm_start_path is not None:
@@ -345,6 +545,7 @@ def learn_player_thetas(
             if em_pair is not None:
                 rec["em_pair"] = [em_pair[0], em_pair[1]]
             em_log_f.write(json.dumps(rec, default=str) + "\n")
+            _mirror_em_history_jsonl_record(rec)
             kind = rec.get("kind")
             if kind in ("preflop_e_step", "postflop_e_step"):
                 _em_lines_since_flush["n"] += 1
@@ -355,7 +556,10 @@ def learn_player_thetas(
                 em_log_f.flush()
 
         if em_log_f is not None:
-            LOG.info("EM jsonl | writing to %s (line-buffered via flush)", em_log_path.resolve())
+            LOG.info(
+                "EM history jsonl | file=%s | line-buffered flushes; console mirror for each record",
+                em_log_path.resolve(),
+            )
             _em_write(
                 {
                     "kind": "em_player_segment_start",
@@ -373,11 +577,12 @@ def learn_player_thetas(
         # Preflop EM
         if bundles:
             LOG.info(
-                "Player %s | starting preflop EM | bundles=%d | outer_iters=%d | m_steps=%d",
+                "Player %s | starting preflop EM | bundles=%d | outer_iters=%d | m_steps=%d | m_batch_size=%d",
                 player,
                 len(bundles),
                 preflop_em_iters,
                 preflop_m_steps,
+                preflop_m_batch_size,
             )
             t0 = time.perf_counter()
             theta_pre, _ = run_preflop_em(
@@ -389,6 +594,7 @@ def learn_player_thetas(
                 m_l2=preflop_m_l2,
                 m_lr=preflop_m_lr,
                 m_steps=preflop_m_steps,
+                m_batch_size=preflop_m_batch_size,
                 history_hook=_em_write if em_log_f is not None else None,
                 bundle_meta=bundle_metas,
             )
@@ -425,11 +631,12 @@ def learn_player_thetas(
 
         if postflop_bundles:
             LOG.info(
-                "Player %s | starting postflop EM | bundles=%d | outer_iters=%d | m_steps=%d",
+                "Player %s | starting postflop EM | bundles=%d | outer_iters=%d | m_steps=%d | m_batch_size=%d",
                 player,
                 len(postflop_bundles),
                 postflop_em_iters,
                 postflop_m_steps,
+                postflop_m_batch_size,
             )
             theta_post, _ = run_postflop_theta_em(
                 postflop_bundles,
@@ -441,6 +648,7 @@ def learn_player_thetas(
                 m_lr=postflop_m_lr,
                 m_steps=postflop_m_steps,
                 m_l2=postflop_m_l2,
+                m_batch_size=postflop_m_batch_size,
                 clip=postflop_clip,
                 history_hook=_em_write if em_log_f is not None else None,
                 hand_meta=postflop_bundle_metas,
@@ -516,6 +724,7 @@ def learn_player_thetas(
 
 
 def main(argv: List[str] | None = None) -> int:
+    """CLI: parse flags, run :func:`learn_player_thetas`, write ``--out`` JSON."""
     args = build_parser().parse_args(argv)
     logging.basicConfig(
         level=getattr(logging, args.log_level),
@@ -525,10 +734,28 @@ def main(argv: List[str] | None = None) -> int:
         force=True,
     )
 
+    file_sessions = read_session_names_file(args.sessions_file) if args.sessions_file else []
+    cli_sessions = list(args.sessions or [])
+    session_names = None
+    if file_sessions or cli_sessions:
+        seen: set[str] = set()
+        merged: List[str] = []
+        for name in file_sessions + cli_sessions:
+            if name not in seen:
+                seen.add(name)
+                merged.append(name)
+        session_names = merged
+    if args.sessions_file:
+        LOG.info(
+            "Sessions file: %s (%d name(s) before merge with --session)",
+            args.sessions_file.expanduser().resolve(),
+            len(file_sessions),
+        )
+
     payload = learn_player_thetas(
         args.inputs,
         args.global_priors,
-        session_names=args.sessions,
+        session_names=session_names,
         max_sessions=args.max_sessions,
         players=args.players,
         warm_start_path=args.warm_start,
@@ -537,11 +764,13 @@ def main(argv: List[str] | None = None) -> int:
         preflop_m_steps=args.preflop_m_steps,
         preflop_m_lr=args.preflop_m_lr,
         preflop_m_l2=args.preflop_m_l2,
+        preflop_m_batch_size=args.preflop_m_batch_size,
         postflop_floor=args.postflop_floor,
         postflop_em_iters=args.postflop_em_iters,
         postflop_m_steps=args.postflop_m_steps,
         postflop_m_lr=args.postflop_m_lr,
         postflop_m_l2=args.postflop_m_l2,
+        postflop_m_batch_size=args.postflop_m_batch_size,
         postflop_clip=args.postflop_clip,
         em_history_dir=args.em_history_dir,
         restrict_preflop_observers=args.preflop_em_observers,
