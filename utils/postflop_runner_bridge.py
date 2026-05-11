@@ -5,12 +5,29 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Dict, Iterable, List, Optional, Tuple
 
+import numpy as np
+
+# (made, draw, rich ndarray, equity) — reused across actions on the same board + hole.
+PostflopStrengthBundle = Tuple[float, float, np.ndarray, float]
+
 from utils.em import PostflopEMHandBundle, PostflopEMTimestep, PostflopThetaObservation
 from utils.filter.helpers import initial_class_prior, normalize
 from utils.filter.postflop import ComboRangeFilter, combo_key, parse_combo_key
 from utils.prior.postflop import CALL, FOLD, PostflopFeatures, RAISE
 from utils.strength.common import Card, parse_cards
-from utils.strength.postflop import board_texture, poker_hand_mapper
+from utils.strength.fast_eval import (
+    card_to_index,
+    combo_key_from_indices,
+    made_percentile_at_combo_key,
+    made_percentile_by_combo_key,
+    rollout_equity_at_combo_key,
+    rollout_equity_by_combo_key,
+)
+from utils.strength.postflop import (
+    board_texture,
+    draw_strength_from_hand,
+    hand_feature_vector,
+)
 
 POSTFLOP_STREETS = ("flop", "turn", "river")
 
@@ -137,8 +154,18 @@ def features_from_context(
     context: StateContext,
     made: float,
     draw: float,
+    *,
+    rich: Optional[np.ndarray] = None,
+    equity: float = -1.0,
 ) -> PostflopFeatures:
-    """Combine state context with a combo's made/draw scores."""
+    """Combine state context with a combo's made/draw scores.
+
+    ``rich`` (Method A) carries the board-relative categorical
+    indicators produced by :func:`utils.strength.postflop.hand_feature_vector`,
+    and ``equity`` (Method E) is the expected made percentile over future
+    runouts. Both default to neutral values so legacy callers that only
+    know ``(made, draw)`` still produce a valid feature row.
+    """
     return PostflopFeatures(
         made=float(made),
         draw=float(draw),
@@ -150,7 +177,44 @@ def features_from_context(
         street=context.street,
         board_wetness=context.board_wetness,
         facing_bet=context.facing_bet,
+        rich=rich,
+        equity=float(equity),
     )
+
+
+def compute_postflop_strength_bundle(
+    board: str,
+    hole_cards: str,
+    *,
+    equity_mc_samples: Optional[int] = 32,
+) -> Optional[PostflopStrengthBundle]:
+    """Made / draw / rich / equity for a fixed board string + hole (no pot or position).
+
+    Used by :func:`collect_postflop_observations_known_hole_cards` so repeated
+    decisions on the same board only pay for one flop rollout / percentile pass.
+    """
+    if not hole_cards or len(hole_cards) < 4 or not board or len(board) < 6:
+        return None
+    try:
+        board_cards = parse_cards([board[i : i + 2] for i in range(0, len(board), 2)])
+        hole = parse_cards([hole_cards[0:2], hole_cards[2:4]])
+    except (ValueError, Exception):
+        return None
+    if len(board_cards) < 3 or len(hole) != 2:
+        return None
+
+    board_tuple = tuple(sorted(card_to_index(c) for c in board_cards))
+    combo_key = combo_key_from_indices(card_to_index(hole[0]), card_to_index(hole[1]))
+
+    made_p = made_percentile_at_combo_key(board_tuple, combo_key)
+    made = 0.5 if made_p is None else float(made_p)
+    draw = float(draw_strength_from_hand(hole, board_cards))
+    rich = hand_feature_vector(hole, board_cards)
+
+    mc = equity_mc_samples if len(board_tuple) == 3 else None
+    eq_p = rollout_equity_at_combo_key(board_tuple, combo_key, mc_samples=mc)
+    equity = float(made if eq_p is None else eq_p)
+    return (made, draw, rich, equity)
 
 
 def postflop_features_from_state(
@@ -158,24 +222,36 @@ def postflop_features_from_state(
     target: str,
     street: str,
     hole_cards: str,
+    *,
+    equity_mc_samples: Optional[int] = 32,
+    strength_bundle: Optional[PostflopStrengthBundle] = None,
 ) -> Optional[PostflopFeatures]:
-    """Compute features for *target* acting next in ``state`` with known hole cards."""
+    """Compute features for *target* acting next in ``state`` with known hole cards.
+
+    Uses cached per-board tensors plus O(1) combo lookups — avoids rebuilding
+    full percentile / equity dicts on every street action (see
+    :func:`utils.strength.fast_eval.made_percentile_at_combo_key`).
+
+    Pass ``strength_bundle`` from :func:`compute_postflop_strength_bundle` when the
+    board + hole are unchanged so pot / position context can update without
+    recomputing rollouts.
+    """
     if not hole_cards or len(hole_cards) < 4:
         return None
     context = state_context_from_state(state, target, street)
     if context is None:
         return None
 
-    board = state.community_cards or ""
-    try:
-        info = poker_hand_mapper(hole_cards, board)
-    except (ValueError, Exception):
-        return None
-
-    tex = info.get("board_texture") or {}
-    wet = _board_wetness_from_mapper(tex)
-    made = float(info.get("made", 0.5))
-    draw = float(info.get("draw", 0.0))
+    if strength_bundle is not None:
+        made, draw, rich, equity = strength_bundle
+    else:
+        board = state.community_cards or ""
+        bundle = compute_postflop_strength_bundle(
+            board, hole_cards, equity_mc_samples=equity_mc_samples
+        )
+        if bundle is None:
+            return None
+        made, draw, rich, equity = bundle
 
     return PostflopFeatures(
         made=made,
@@ -186,39 +262,86 @@ def postflop_features_from_state(
         multiway=context.multiway,
         spr=context.spr,
         street=street,
-        board_wetness=wet,
+        board_wetness=context.board_wetness,
         facing_bet=context.facing_bet,
+        rich=rich,
+        equity=equity,
     )
+
+
+# Type alias for the strength cache: maps board string to a dict of
+# ``combo_key → (made, draw, rich, equity)`` rows. Cached by the runner
+# across consecutive actions that share the same community cards.
+ComboStrengthEntry = Tuple[float, float, np.ndarray, float]
+ComboStrengthCache = Dict[str, Dict[str, ComboStrengthEntry]]
+
+
+def _build_combo_strength_table(
+    board: str,
+    *,
+    equity_mc_samples: Optional[int] = 32,
+) -> Dict[str, ComboStrengthEntry]:
+    """All-at-once ``(made, draw, rich, equity)`` for every live combo on ``board``.
+
+    Uses the cached per-board percentile and rollout-equity tables
+    (Methods 1 & E) so each combo costs O(1) lookups instead of an
+    opponent-enumeration sweep. The ``rich`` block (Method A) is
+    recomputed locally from the parsed hole cards (~1 µs per combo).
+    """
+    board_cards = parse_cards([board[i : i + 2] for i in range(0, len(board), 2)])
+    if len(board_cards) < 3:
+        return {}
+    board_idx = tuple(card_to_index(c) for c in board_cards)
+    made_table = made_percentile_by_combo_key(board_idx)
+    if len(board_idx) >= 5:
+        equity_table = made_table
+    else:
+        equity_table = rollout_equity_by_combo_key(
+            board_idx,
+            mc_samples=equity_mc_samples if len(board_idx) == 3 else None,
+        )
+
+    out: Dict[str, ComboStrengthEntry] = {}
+    for key, made in made_table.items():
+        ca, cb = parse_combo_key(key)
+        hole = [ca, cb]
+        draw = draw_strength_from_hand(hole, board_cards)
+        rich = hand_feature_vector(hole, board_cards)
+        equity = float(equity_table.get(key, made))
+        out[key] = (float(made), float(draw), rich, equity)
+    return out
 
 
 def precompute_combo_strengths(
     combos: Iterable[str],
     board: str,
     *,
-    cache: Optional[Dict[Tuple[str, str], Tuple[float, float]]] = None,
-) -> Dict[str, Tuple[float, float]]:
-    """Compute per-combo (made, draw) scores once for a fixed board.
+    cache: Optional[ComboStrengthCache] = None,
+    equity_mc_samples: Optional[int] = 32,
+) -> Dict[str, ComboStrengthEntry]:
+    """Compute per-combo ``(made, draw, rich, equity)`` for ``combos`` on ``board``.
 
-    The optional ``cache`` (keyed by ``(combo_key, board_str)``) lets a caller
-    persist (combo, board) → (made, draw) pairs across consecutive action
-    updates that share the same board, avoiding the dominant
-    ``poker_hand_mapper`` cost.
+    The all-1326 board table is built once (vectorized) and the subset
+    matching ``combos`` is sliced out — orders of magnitude faster than
+    looping :func:`poker_hand_mapper` per combo. The optional ``cache``
+    is keyed by board string and stores the full per-board table so
+    successive action updates on the same street are free.
     """
-    out: Dict[str, Tuple[float, float]] = {}
-    for combo in combos:
-        cache_key = (combo, board)
-        if cache is not None and cache_key in cache:
-            out[combo] = cache[cache_key]
-            continue
-        try:
-            info = poker_hand_mapper(combo, board)
-        except (ValueError, Exception):
-            continue
-        made = float(info.get("made", 0.5))
-        draw = float(info.get("draw", 0.0))
-        out[combo] = (made, draw)
+    if cache is not None and board in cache:
+        full = cache[board]
+    else:
+        full = _build_combo_strength_table(
+            board, equity_mc_samples=equity_mc_samples
+        )
         if cache is not None:
-            cache[cache_key] = (made, draw)
+            cache[board] = full
+
+    out: Dict[str, ComboStrengthEntry] = {}
+    for combo in combos:
+        entry = full.get(combo)
+        if entry is None:
+            continue
+        out[combo] = entry
     return out
 
 
@@ -228,13 +351,15 @@ def combo_features_for_state(
     street: str,
     combos: Iterable[str],
     *,
-    strength_cache: Optional[Dict[Tuple[str, str], Tuple[float, float]]] = None,
+    strength_cache: Optional[ComboStrengthCache] = None,
+    equity_mc_samples: Optional[int] = 32,
 ) -> Tuple[Optional[StateContext], Dict[str, PostflopFeatures]]:
     """Return ``(context, {combo_key: PostflopFeatures})`` for an action point.
 
     Combos blocked by the board (or otherwise un-evaluable) are silently
-    dropped from the output map. The reusable ``strength_cache`` is only valid
-    for as long as the board (community cards) doesn't change.
+    dropped from the output map. ``strength_cache`` is keyed by the
+    board string and is only valid for as long as the community cards
+    don't change — clear it on the turn / river deal.
     """
     context = state_context_from_state(state, target, street)
     if context is None:
@@ -254,10 +379,15 @@ def combo_features_for_state(
             continue
         eligible.append(combo)
 
-    strengths = precompute_combo_strengths(eligible, board, cache=strength_cache)
+    strengths = precompute_combo_strengths(
+        eligible, board, cache=strength_cache,
+        equity_mc_samples=equity_mc_samples,
+    )
     feats: Dict[str, PostflopFeatures] = {}
-    for combo, (made, draw) in strengths.items():
-        feats[combo] = features_from_context(context, made, draw)
+    for combo, (made, draw, rich, equity) in strengths.items():
+        feats[combo] = features_from_context(
+            context, made, draw, rich=rich, equity=equity
+        )
     return context, feats
 
 
@@ -289,7 +419,7 @@ def collect_postflop_em_bundle_for_hand(
     initial_169 = normalize(initial_class_prior(dead_cards=observer_hole))
 
     timesteps: List[PostflopEMTimestep] = []
-    strength_cache: Dict[Tuple[str, str], Tuple[float, float]] = {}
+    strength_cache: ComboStrengthCache = {}
     last_board: Optional[str] = None
     combos: Dict[str, float] = {}
     initialized = False
@@ -357,14 +487,23 @@ def collect_postflop_observations_known_hole_cards(
     hand,
     target: str,
     hand_index: int,
+    *,
+    equity_mc_samples: int = 8,
 ) -> Optional[PostflopThetaObservation]:
-    """Single combo observation for one hand if ``target`` hole cards are known."""
+    """Single combo observation for one hand if ``target`` hole cards are known.
+
+    ``equity_mc_samples``: flop rollout Monte Carlo size when building Method E
+    equity (default **8** for bulk training speed; use **32** for closer match to
+    interactive runner defaults).
+    """
     hole = hand.hole_cards.get(target, "") or ""
     if len(hole) < 4:
         return None
 
     combo_key = f"h{hand_index}|{hole}"
     decisions: List[Tuple[PostflopFeatures, int]] = []
+    # Same (community_cards, hole) often repeats across many postflop actions.
+    strength_by_board_hole: Dict[Tuple[str, str], PostflopStrengthBundle] = {}
 
     for street in POSTFLOP_STREETS:
         acts = hand.actions.get(street, {})
@@ -377,7 +516,20 @@ def collect_postflop_observations_known_hole_cards(
                 continue
             st = sts[ai]
             bucket = acts[ai][1][0]
-            feat = postflop_features_from_state(st, target, street, hole)
+            board_str = st.community_cards or ""
+            if len(board_str) < 6:
+                continue
+            bh_key = (board_str, hole)
+            if bh_key not in strength_by_board_hole:
+                b = compute_postflop_strength_bundle(
+                    board_str, hole, equity_mc_samples=equity_mc_samples
+                )
+                if b is None:
+                    continue
+                strength_by_board_hole[bh_key] = b
+            feat = postflop_features_from_state(
+                st, target, street, hole, strength_bundle=strength_by_board_hole[bh_key]
+            )
             if feat is None:
                 continue
             a = raw_action_bucket_to_postflop(bucket)

@@ -6,6 +6,8 @@ import math
 from itertools import combinations
 from typing import Dict, Iterable, List, Mapping, Optional, Tuple, Union
 
+import numpy as np
+
 from utils.filter.helpers import FilterStep, effective_sample_size, normalize
 from utils.prior.postflop import PostflopFeatures, PostflopPrior
 from utils.prior.preflop import StateKey
@@ -275,9 +277,11 @@ class ComboRangeFilter:
 
         ``feature_by_combo`` maps each canonical combo key to the
         :class:`PostflopFeatures` derived from that combo together with the
-        current betting state and board. The post-flop prior is queried per
-        combo, and combos with no entry in ``feature_by_combo`` (e.g. blocked
-        by the board) are zeroed out.
+        current betting state and board. Combos with no entry are zeroed
+        out. Internally we batch every live combo into a single
+        ``(N, PHI_DIM)`` feature matrix and let
+        :meth:`PostflopPrior.action_probs_matrix` compute all action
+        likelihoods with one matmul + one softmax (Method D).
         """
         if not self.combos:
             raise ValueError(
@@ -285,18 +289,39 @@ class ComboRangeFilter:
                 "or pass an initial_combo_dist before updating."
             )
 
-        unnorm: Dict[str, float] = {}
+        live_combos: List[str] = []
+        live_probs: List[float] = []
+        live_feats: List[PostflopFeatures] = []
         for combo, prob in self.combos.items():
             if prob <= 0.0:
                 continue
             feat = feature_by_combo.get(combo)
             if feat is None:
                 continue
-            probs = self.prior_model.action_probs(feat)
-            weight = float(probs.get(action_bucket, 0.0))
-            if weight <= 0.0:
-                continue
-            unnorm[combo] = prob * weight
+            live_combos.append(combo)
+            live_probs.append(float(prob))
+            live_feats.append(feat)
+
+        if live_combos:
+            from utils.prior.postflop import feature_vector
+
+            phi = np.stack([feature_vector(f) for f in live_feats], axis=0)
+            facing = np.fromiter(
+                (f.facing_bet for f in live_feats),
+                dtype=bool,
+                count=len(live_feats),
+            )
+            probs_matrix = self.prior_model.action_probs_matrix(phi, facing)
+            action_col = probs_matrix[:, int(action_bucket)]
+            prior_arr = np.asarray(live_probs, dtype=float)
+            unnorm_arr = prior_arr * action_col
+            unnorm = {
+                c: float(v)
+                for c, v in zip(live_combos, unnorm_arr)
+                if v > 0.0
+            }
+        else:
+            unnorm = {}
 
         evidence = sum(unnorm.values())
         if evidence <= 0.0:

@@ -76,21 +76,15 @@ def preflop_phi_column_labels() -> List[str]:
 
 
 def postflop_phi_column_labels() -> List[str]:
-    return [
-        "bias",
-        "made",
-        "draw",
-        "made_x_draw",
-        "polar_m",
-        "bet_frac_pot",
-        "pot_odds",
-        "in_position",
-        "multiway",
-        "log_1_plus_spr",
-        "street_turn",
-        "street_river",
-        "board_wetness",
-    ]
+    """Names for each entry of the length-``PHI_DIM`` postflop feature vector.
+
+    Tracks the base + rich + equity blocks defined in
+    :mod:`utils.prior.postflop`. Bumped from 13 to 30 alongside Method A
+    (rich per-combo categorical features) and Method E (rollout equity).
+    """
+    from utils.prior.postflop import phi_column_labels as _labels
+
+    return list(_labels())
 
 
 def _verify_phi_dims() -> None:
@@ -417,13 +411,30 @@ def collect_preflop_supervised_rows(refs: Sequence[HandRef]) -> Tuple[np.ndarray
 
 def collect_postflop_supervised_rows(
     refs: Sequence[HandRef],
+    *,
+    progress_hook: Optional[Callable[[str, Dict[str, Any]], None]] = None,
+    postflop_equity_mc: int = 8,
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-    """Split into facing-bet (3-class) and no-bet (CALL vs RAISE) training rows."""
+    """Split into facing-bet (3-class) and no-bet (CALL vs RAISE) training rows.
+
+    ``progress_hook``: optional ``hook(phase, detail)`` with ``phase="postflop_rows_progress"``
+    and ``detail`` containing ``done``, ``total`` (1-based hand index through ``refs``).
+
+    ``postflop_equity_mc``: flop rollout Monte Carlo sample count for Method E
+    equity when building rows (smaller is faster; ``32`` matches older defaults).
+    """
     xf, yf = [], []
     xn, yn = [], []
-    for ref in refs:
+    n = len(refs)
+    report_every = max(1, min(100, n // 20 or 1)) if n else 1
+    for i, ref in enumerate(refs):
         for player in ref.hand.player_names:
-            obs = collect_postflop_observations_known_hole_cards(ref.hand, player, ref.global_index)
+            obs = collect_postflop_observations_known_hole_cards(
+                ref.hand,
+                player,
+                ref.global_index,
+                equity_mc_samples=postflop_equity_mc,
+            )
             if obs is None:
                 continue
             for feat, action in obs.decisions:
@@ -436,6 +447,10 @@ def collect_postflop_supervised_rows(
                         continue
                     xn.append(xv)
                     yn.append(int(action))
+        if progress_hook and n and (
+            i + 1 == 1 or i + 1 == n or (i + 1) % report_every == 0
+        ):
+            progress_hook("postflop_rows_progress", {"done": i + 1, "total": n})
     if not xf:
         Xf = np.zeros((0, 13))
         Yf = np.zeros((0,), dtype=int)

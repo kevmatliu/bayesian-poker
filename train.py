@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import logging
 import sys
+import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence
 
@@ -19,6 +20,7 @@ from pipeline_common import (
     flatten_hands,
     postflop_phi_column_labels,
     preflop_phi_column_labels,
+    read_session_names_file,
 )
 from utils.prior.postflop import (
     CALL,
@@ -39,6 +41,28 @@ from utils.prior.preflop import (
 )
 
 LOG = logging.getLogger("train")
+
+
+def _flatten_hands_log_progress(phase: str, detail: Dict[str, Any]) -> None:
+    """Hook for ``flatten_hands`` — periodic parse progress (same idea as runner hand N/M logs)."""
+    if phase == "flatten_hands_jobs":
+        LOG.info("Parse queue: %d .phh file(s)", detail.get("n_files", 0))
+    elif phase == "flatten_hands_parse":
+        done = int(detail.get("done", 0))
+        total = int(detail.get("total", 0))
+        workers = detail.get("workers")
+        if workers:
+            LOG.info("Parsed %d/%d .phh files (workers=%s)", done, total, workers)
+        else:
+            LOG.info("Parsed %d/%d .phh files", done, total)
+
+
+def _postflop_rows_log_progress(phase: str, detail: Dict[str, Any]) -> None:
+    """Hook for ``collect_postflop_supervised_rows`` — same wording as the phase start, with done/total."""
+    if phase == "postflop_rows_progress":
+        done = int(detail.get("done", 0))
+        total = int(detail.get("total", 0))
+        LOG.info("Collecting postflop supervised rows (%d/%d hands)…", done, total)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -67,6 +91,17 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--postflop-epochs", type=int, default=50)
     p.add_argument("--postflop-l2", type=float, default=0.0)
     p.add_argument(
+        "--postflop-equity-mc",
+        type=int,
+        default=8,
+        metavar="N",
+        help=(
+            "Flop rollout equity Monte Carlo samples when collecting postflop supervised rows "
+            "(Method E). Lower is much faster on large corpora; use 32 for closer parity with "
+            "the interactive runner default."
+        ),
+    )
+    p.add_argument(
         "--session",
         action="append",
         dest="sessions",
@@ -74,6 +109,16 @@ def build_parser() -> argparse.ArgumentParser:
         help=(
             "When loading a Pluribus root (folder of session subfolders), only include these "
             "session directory names, e.g. --session 30 --session 99. Repeatable."
+        ),
+    )
+    p.add_argument(
+        "--sessions-file",
+        type=Path,
+        default=None,
+        metavar="PATH",
+        help=(
+            "Same as --session but read names from a text file: one session directory per line, "
+            "# starts a comment. Merged with any --session flags (file first, then CLI, duplicates dropped)."
         ),
     )
     p.add_argument(
@@ -98,21 +143,66 @@ def train_global_priors(
     postflop_lr: float = 0.15,
     postflop_epochs: int = 50,
     postflop_l2: float = 0.0,
+    postflop_equity_mc: int = 8,
 ) -> Dict[str, Any]:
     if refs is None:
         if not inputs:
             raise ValueError("train_global_priors needs inputs or refs")
+        resolved = [str(Path(x).expanduser().resolve()) for x in inputs]
+        shown = resolved[:5]
+        tail = ""
+        if len(resolved) > 5:
+            tail = f" … (+{len(resolved) - 5} more)"
+        LOG.info(
+            "Loading hands | paths (%d): %s%s | session_filter=%s | max_sessions=%s",
+            len(resolved),
+            ", ".join(shown),
+            tail,
+            list(session_names) if session_names is not None else None,
+            max_sessions,
+        )
+        t_flat = time.perf_counter()
         refs = flatten_hands(
             inputs,
             session_names=session_names,
             max_sessions=max_sessions,
+            progress_hook=_flatten_hands_log_progress,
         )
-        LOG.info("Loaded %d hands from %d path(s)", len(refs), len(tuple(inputs)))
-    else:
-        LOG.info("Using %d pre-loaded hand refs", len(refs))
+        LOG.info(
+            "Loaded %d hands from %d path(s) in %.1fs",
+            len(refs),
+            len(tuple(inputs)),
+            time.perf_counter() - t_flat,
+        )
 
+    t_rows = time.perf_counter()
+    LOG.info("Collecting preflop supervised rows (%d hands)…", len(refs))
     X_pre, y_pre = collect_preflop_supervised_rows(refs)
-    Xf, yf, Xn, yn = collect_postflop_supervised_rows(refs)
+    LOG.info(
+        "Preflop supervised rows done in %.1fs | samples=%d",
+        time.perf_counter() - t_rows,
+        int(X_pre.shape[0]),
+    )
+
+    t_pf = time.perf_counter()
+    n_hands = len(refs)
+    if n_hands == 0:
+        LOG.info("Collecting postflop supervised rows (0 hands)…")
+        Xf, yf, Xn, yn = collect_postflop_supervised_rows(
+            refs, postflop_equity_mc=postflop_equity_mc
+        )
+    else:
+        Xf, yf, Xn, yn = collect_postflop_supervised_rows(
+            refs,
+            progress_hook=_postflop_rows_log_progress,
+            postflop_equity_mc=postflop_equity_mc,
+        )
+    LOG.info(
+        "Postflop supervised rows done in %.1fs | facing=%d | no_bet=%d",
+        time.perf_counter() - t_pf,
+        int(Xf.shape[0]),
+        int(Xn.shape[0]),
+    )
 
     payload: Dict[str, Any] = {
         "schema": "bayesian_poker.global_priors.v1",
@@ -125,6 +215,14 @@ def train_global_priors(
 
     # Preflop beta: rows correspond to FOLD, CHECK_CALL, RAISE
     if X_pre.shape[0] > 0:
+        LOG.info(
+            "Fitting preflop baseline | samples=%d | epochs=%d | lr=%s | l2=%s",
+            int(X_pre.shape[0]),
+            preflop_epochs,
+            preflop_lr,
+            preflop_l2,
+        )
+        t_fit = time.perf_counter()
         beta_preflop = train_baseline_preflop(
             X_pre,
             y_pre,
@@ -132,7 +230,11 @@ def train_global_priors(
             max_epochs=preflop_epochs,
             l2=preflop_l2,
         )
-        LOG.info("Preflop baseline: %d samples, beta shape %s", X_pre.shape[0], beta_preflop.shape)
+        LOG.info(
+            "Preflop baseline fit done in %.1fs | beta shape %s",
+            time.perf_counter() - t_fit,
+            beta_preflop.shape,
+        )
     else:
         beta_preflop = HEURISTIC_BETA_PREFLOP.copy()
         LOG.warning("No supervised preflop rows (need hole cards + preflop actions); using heuristic beta_preflop.")
@@ -149,6 +251,14 @@ def train_global_priors(
 
     # Postflop: two heads — facing bet (3-way) and no bet (call vs raise)
     if Xf.shape[0] > 0:
+        LOG.info(
+            "Fitting postflop baseline (facing bet) | samples=%d | epochs=%d | lr=%s | l2=%s",
+            int(Xf.shape[0]),
+            postflop_epochs,
+            postflop_lr,
+            postflop_l2,
+        )
+        t_face = time.perf_counter()
         beta_facing = train_baseline_facing_bet(
             Xf,
             yf,
@@ -156,11 +266,20 @@ def train_global_priors(
             max_epochs=postflop_epochs,
             l2=postflop_l2,
         )
+        LOG.info("Postflop facing-bet fit done in %.1fs", time.perf_counter() - t_face)
     else:
         beta_facing = PostflopPrior().beta_facing_matrix
         LOG.warning("No facing-bet postflop rows; using heuristic beta_facing.")
 
     if Xn.shape[0] > 0:
+        LOG.info(
+            "Fitting postflop baseline (no bet) | samples=%d | epochs=%d | lr=%s | l2=%s",
+            int(Xn.shape[0]),
+            postflop_epochs,
+            postflop_lr,
+            postflop_l2,
+        )
+        t_nb = time.perf_counter()
         beta_no_bet = train_baseline_no_bet(
             Xn,
             yn,
@@ -168,6 +287,7 @@ def train_global_priors(
             max_epochs=postflop_epochs,
             l2=postflop_l2,
         )
+        LOG.info("Postflop no-bet fit done in %.1fs", time.perf_counter() - t_nb)
     else:
         beta_no_bet = PostflopPrior().beta_no_bet_matrix
         LOG.warning("No no-bet postflop rows; using heuristic beta_no_bet.")
@@ -179,6 +299,7 @@ def train_global_priors(
         "shape_no_bet": list(np.asarray(beta_no_bet).shape),
         "phi_dim": PHI_DIM,
         "phi_column_labels": postflop_phi_column_labels(),
+        "equity_mc_samples": int(postflop_equity_mc),
         "facing_action_labels": ["fold", "call", "raise"],
         "facing_indices": {"fold": PF_FOLD_POST, "call": CALL, "raise": PF_RAISE_POST},
         "no_bet_action_labels": ["call", "raise"],
@@ -194,15 +315,45 @@ def main(argv: List[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     logging.basicConfig(
         level=getattr(logging, args.log_level),
-        format="%(asctime)s | %(levelname)-7s | %(message)s",
+        format="%(asctime)s | %(levelname)-7s | %(name)s | %(message)s",
         datefmt="%H:%M:%S",
         stream=sys.stderr,
         force=True,
     )
 
+    LOG.info(
+        "Run start | out=%s | preflop train: epochs=%d lr=%s | postflop train: epochs=%d lr=%s | "
+        "postflop row equity MC=%d",
+        args.out,
+        args.preflop_epochs,
+        args.preflop_lr,
+        args.postflop_epochs,
+        args.postflop_lr,
+        args.postflop_equity_mc,
+    )
+
+    file_sessions = read_session_names_file(args.sessions_file) if args.sessions_file else []
+    cli_sessions = list(args.sessions or [])
+    session_names = None
+    if file_sessions or cli_sessions:
+        seen: set[str] = set()
+        merged: List[str] = []
+        for name in file_sessions + cli_sessions:
+            if name not in seen:
+                seen.add(name)
+                merged.append(name)
+        session_names = merged
+
+    if args.sessions_file:
+        LOG.info(
+            "Sessions file: %s (%d name(s) before merge with --session)",
+            args.sessions_file.expanduser().resolve(),
+            len(file_sessions),
+        )
+
     payload = train_global_priors(
         args.inputs,
-        session_names=args.sessions,
+        session_names=session_names,
         max_sessions=args.max_sessions,
         preflop_lr=args.preflop_lr,
         preflop_epochs=args.preflop_epochs,
@@ -210,6 +361,7 @@ def main(argv: List[str] | None = None) -> int:
         postflop_lr=args.postflop_lr,
         postflop_epochs=args.postflop_epochs,
         postflop_l2=args.postflop_l2,
+        postflop_equity_mc=args.postflop_equity_mc,
     )
 
     out_path = dump_json(args.out, payload)

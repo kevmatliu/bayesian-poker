@@ -301,7 +301,7 @@ def _run_postflop_combo_filter_for_hand(
     )
 
     decisions: List[PostflopDecision] = []
-    strength_cache: Dict[Tuple[str, str], Tuple[float, float]] = {}
+    strength_cache: Dict[str, Dict[str, Tuple]] = {}
     last_board: Optional[str] = None
     initialized = False
     prev_street_after_update: Optional[str] = None

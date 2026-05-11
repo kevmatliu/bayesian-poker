@@ -60,26 +60,47 @@ def e_step_postflop_bundle(
     bundle: PostflopEMHandBundle,
     prior: PostflopPrior,
 ) -> Dict[str, float]:
-    """q(c) ∝ pi_0(c) * prod_t P_theta(a_t | x_t(c)); pi_0 is the exact combo probability vector."""
-    log_q: Dict[str, float] = {}
-    for combo, p0 in bundle.initial_combo_range.items():
-        if p0 <= 0.0:
-            continue
-        logp = math.log(p0)
-        ok = True
-        for step in bundle.decisions:
-            feat_map = dict(step.features_by_combo)
-            feat = feat_map.get(combo)
-            if feat is None:
-                ok = False
-                break
-            probs = prior.action_probs(feat)
-            logp += math.log(max(probs.get(step.action, 0.0), 1e-300))
-        if not ok:
-            continue
-        log_q[combo] = logp
+    """``q(c) ∝ pi_0(c) * prod_t P_theta(a_t | x_t(c))``.
+
+    Batched across combos using :meth:`PostflopPrior.action_probs_matrix`
+    (Method D): for each timestep we evaluate every combo's likelihood in
+    one matmul instead of one Python softmax per combo.
+    """
+    from utils.prior.postflop import feature_vector
+
+    initial = bundle.initial_combo_range
+    log_q: Dict[str, float] = {
+        combo: math.log(p0) for combo, p0 in initial.items() if p0 > 0.0
+    }
     if not log_q:
-        raise ValueError("E-step: no combo with positive prior mass and full feature coverage")
+        raise ValueError("E-step: empty initial combo range")
+    alive = set(log_q.keys())
+
+    for step in bundle.decisions:
+        feat_map = dict(step.features_by_combo)
+        # Combos that don't appear at this step (e.g. now blocked by a
+        # new community card) drop out of ``alive``.
+        live = [c for c in alive if c in feat_map]
+        if not live:
+            raise ValueError(
+                "E-step: every combo dropped out before all decisions consumed"
+            )
+        phi = np.stack([feature_vector(feat_map[c]) for c in live], axis=0)
+        facing = np.fromiter(
+            (feat_map[c].facing_bet for c in live),
+            dtype=bool,
+            count=len(live),
+        )
+        log_probs = prior.action_log_probs_matrix(phi, facing)
+        log_pa = log_probs[:, int(step.action)]
+        for combo, lp in zip(live, log_pa):
+            log_q[combo] += float(lp)
+        # Drop combos that fell off this step.
+        alive = set(live)
+
+    log_q = {c: v for c, v in log_q.items() if c in alive}
+    if not log_q:
+        raise ValueError("E-step: no combo survived to the final decision")
     return normalize_log_weights(log_q)
 
 
@@ -118,13 +139,28 @@ def postflop_theta_gradient_bundles(
     *,
     l2: float = 0.25,
 ) -> np.ndarray:
+    """Batched M-step gradient.
+
+    For each timestep we materialise the live combos as a single
+    ``(N, PHI_DIM)`` feature matrix and call
+    :meth:`PostflopPrior.action_probs_matrix` once. The gradient
+    contribution simplifies to ``w * (e_action - p_theta)`` after
+    cancelling the ``-E_p[u]`` drift term across actions, so we can
+    accumulate it with a single weighted sum per row (Method D).
+    """
+    from utils.prior.postflop import feature_vector
+
     grad = np.zeros(3, dtype=float)
     theta_vec = prior_template.theta_vec
+    eye = np.eye(3, dtype=float)
 
     for bundle, qmap in zip(bundles, q_by_hand):
+        if not qmap:
+            continue
         for step in bundle.decisions:
             feat_map = dict(step.features_by_combo)
-            action = step.action
+            action = int(step.action)
+            live: List[Tuple[str, float, PostflopFeatures]] = []
             for combo, w in qmap.items():
                 wf = float(w)
                 if wf <= 0.0:
@@ -132,13 +168,20 @@ def postflop_theta_gradient_bundles(
                 feat = feat_map.get(combo)
                 if feat is None:
                     continue
-                utilities = prior_template.action_utility_vectors(feat)
-                p_theta = prior_template.action_probs(feat)
-                legal = prior_template.legal_actions(feat)
-                expected_u = np.zeros(3, dtype=float)
-                for b in legal:
-                    expected_u += float(p_theta[b]) * utilities[b]
-                grad += wf * (utilities[action] - expected_u)
+                live.append((combo, wf, feat))
+            if not live:
+                continue
+            phi = np.stack([feature_vector(t[2]) for t in live], axis=0)
+            facing = np.fromiter(
+                (t[2].facing_bet for t in live),
+                dtype=bool,
+                count=len(live),
+            )
+            weights = np.asarray([t[1] for t in live], dtype=float)
+            p_theta = prior_template.action_probs_matrix(phi, facing)  # (N, 3)
+            # u(action) - E_p[u] = e_action - p_theta
+            diff = eye[action][None, :] - p_theta  # (N, 3)
+            grad += (weights[:, None] * diff).sum(axis=0)
 
     grad -= l2 * theta_vec
     return grad
