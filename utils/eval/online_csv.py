@@ -19,7 +19,7 @@ from utils.eval.strength import (
 from utils.eval.table import board_at_street_end, seat_columns
 from utils.filter import all_combo_keys, combo_key
 from utils.parse import Hand
-from utils.strength.common import parse_card, parse_cards
+from utils.parse import parse_card, parse_cards
 from utils.strength.postflop import draw_strength_from_hand
 from utils.strength.preflop import get_equivalence_class
 

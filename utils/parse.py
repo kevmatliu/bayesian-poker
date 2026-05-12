@@ -1,17 +1,84 @@
-import os
-import numpy as np
+"""Pluribus ``.phh`` parsing (pokerkit) and shared card primitives (rank/suit, deck order)."""
 
+from __future__ import annotations
+
+from dataclasses import dataclass
+from typing import Dict, Iterable, List, Tuple
+
+RANK_TO_VALUE = {
+    "2": 2,
+    "3": 3,
+    "4": 4,
+    "5": 5,
+    "6": 6,
+    "7": 7,
+    "8": 8,
+    "9": 9,
+    "T": 10,
+    "J": 11,
+    "Q": 12,
+    "K": 13,
+    "A": 14,
+}
+VALUE_TO_RANK = {v: k for k, v in RANK_TO_VALUE.items()}
+
+
+@dataclass(frozen=True)
+class Card:
+    rank: str
+    suit: str
+
+    @property
+    def value(self) -> int:
+        return RANK_TO_VALUE[self.rank]
+
+
+def parse_card(card: str) -> Card:
+    card = card.strip().upper()
+    if len(card) != 2:
+        raise ValueError(f"Invalid card: {card}")
+    rank, suit = card[0], card[1]
+    if rank not in RANK_TO_VALUE:
+        raise ValueError(f"Invalid rank: {rank}")
+    if suit not in {"S", "H", "D", "C"}:
+        raise ValueError(f"Invalid suit: {suit}")
+    return Card(rank, suit)
+
+
+def parse_cards(cards: Iterable[str]) -> List[Card]:
+    parsed = [parse_card(c) if isinstance(c, str) else c for c in cards]
+    if len(set(parsed)) != len(parsed):
+        raise ValueError("Duplicate cards detected.")
+    return parsed
+
+
+def all_52_cards() -> List[Card]:
+    """Full deck in deterministic order."""
+    return [Card(r, s) for s in "SHDC" for r in "23456789TJQKA"]
+
+
+import numpy as np
 from pathlib import Path
+
 from pokerkit import HandHistory
 
-from utils.filter.postflop import all_combo_keys
-from utils.strength.common import Card
 from utils.strength.postflop import poker_hand_mapper
 from utils.strength.preflop import all_169_classes, get_equivalence_class
-from utils.action_map import classify
 
-_ALL_COMBOS = all_combo_keys()
-_COMBO_INDEX = {key: i for i, key in enumerate(_ALL_COMBOS)}
+_ALL_COMBOS: List[str] | None = None
+_COMBO_INDEX: Dict[str, int] | None = None
+
+
+def _combo_catalog() -> Tuple[List[str], Dict[str, int]]:
+    """Lazily build the 1,326 combo list to avoid import cycles with ``utils.filter.postflop``."""
+    global _ALL_COMBOS, _COMBO_INDEX
+    if _ALL_COMBOS is None or _COMBO_INDEX is None:
+        from utils.filter.postflop import all_combo_keys
+
+        _ALL_COMBOS = all_combo_keys()
+        _COMBO_INDEX = {key: i for i, key in enumerate(_ALL_COMBOS)}
+    return _ALL_COMBOS, _COMBO_INDEX
+
 
 class State:
     def __init__(
@@ -89,9 +156,10 @@ class Hand:
                 player_j: np.zeros(7) for player_j in self.player_names if player_j != player_i
             } for player_i in self.player_names
         }
+        _combos, _ = _combo_catalog()
         self.combo_range = {                                    # player1 --> player2 --> 1326-dim vector of combo frequencies on player2 from player1 perspective
             player_i: {
-                player_j: np.zeros(len(_ALL_COMBOS)) for player_j in self.player_names if player_j != player_i
+                player_j: np.zeros(len(_combos)) for player_j in self.player_names if player_j != player_i
             } for player_i in self.player_names
         }
 
@@ -224,9 +292,10 @@ class Hand:
         if target not in self.combo_range[observer]:
             raise KeyError(f"Unknown target {target!r} for observer {observer!r}.")
 
-        vector = np.zeros(len(_ALL_COMBOS), dtype=float)
+        combos, combo_index = _combo_catalog()
+        vector = np.zeros(len(combos), dtype=float)
         for combo, prob in combo_distribution.items():
-            idx = _COMBO_INDEX.get(combo)
+            idx = combo_index.get(combo)
             if idx is None:
                 continue
             vector[idx] = float(prob)
@@ -420,7 +489,15 @@ class Hand:
             raise ValueError(f"Unknown action type: {action_type}")
         
 
-        action_bucket = classify(action_type, self._pot, bet=amount)
+        # Raw bucket indices align with ``utils.action.preflop.canonical_preflop_action`` (fold / call / raise).
+        if action_type == "f":
+            action_bucket = 0
+        elif action_type == "cc":
+            action_bucket = 1
+        elif action_type == "cbr":
+            action_bucket = 2
+        else:
+            raise RuntimeError(f"unexpected action_type after dispatch: {action_type!r}")
 
         self._betting_history_this_street.append((player, (action_bucket, self._street_action_level), amount))
 

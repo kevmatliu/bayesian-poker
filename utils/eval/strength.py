@@ -8,7 +8,7 @@ import numpy as np
 
 from utils.eval.logutil import eval_log
 from utils.filter.postflop import parse_combo_key
-from utils.strength.common import Card, parse_cards
+from utils.parse import Card, parse_cards
 from utils.strength.fast_eval import card_to_index, made_percentile_array
 from utils.strength.postflop import draw_strength_from_hand, made_strength_percentile
 
@@ -67,7 +67,7 @@ def expected_made_and_draw_mc(
     combo_dist: Mapping[str, float],
     board_str: str,
     *,
-    n_samples: int = 96,
+    n_samples: int = 100,
     rng: Optional[np.random.Generator] = None,
     verbose: bool = False,
 ) -> Tuple[float, float]:
@@ -164,7 +164,7 @@ def made_percentile_calibration_stats(
     p: Union[np.ndarray, List[float]],
     perc: np.ndarray,
     true_combo_index: int,
-) -> Tuple[float, float, float, float, float, float, float]:
+):
     """
     Summarize how the realized made percentile sits under the combo distribution ``p``.
 

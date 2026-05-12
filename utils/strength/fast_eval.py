@@ -27,7 +27,7 @@ from typing import Dict, Iterable, List, Optional, Tuple
 
 import numpy as np
 
-from utils.strength.common import Card, RANK_TO_VALUE, all_52_cards
+from utils.parse import Card, RANK_TO_VALUE, all_52_cards
 
 _RANK_CHARS = "23456789TJQKA"
 _SUIT_CHARS_UPPER = "SHDC"  # suit_idx 0..3 -> 'S', 'H', 'D', 'C'

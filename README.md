@@ -20,9 +20,14 @@ Supervised training of `beta` uses only rows where the actor’s hole cards are 
 
 | Path | Role |
 |------|------|
-| `train.py` | Fit `artifacts/global_priors.json` from `.phh` corpora. |
-| `find_theta.py` | Load global priors, build EM bundles, run preflop + postflop EM per player. |
+| `runners/` | CLI entrypoints (see below). |
+| `runners/train.py` | Fit `artifacts/global_priors.json` from `.phh` corpora. |
+| `runners/find_theta.py` | Load global priors, build EM bundles, run preflop + postflop EM per player. |
+| `runners/filter_sessions.py` | Batch combo-range filtering over many sessions (`command_filter.sh`). |
+| `runners/execute.py` | Shared preflop/postflop filter + EM helpers used by `filter_sessions`. |
+| `runners/models.py` | Dataclasses / config shared by `execute` and `priors_artifacts`. |
 | `pipeline_common.py` | Hand loading, session expansion, supervised row collection, EM bundle gathering, splits. |
+| `priors_artifacts.py` | Build `PreflopPrior` / `PostflopPrior` from JSON artifacts. |
 | `utils/parse.py` | `.phh` → `Hand` object (states, actions, hole cards). |
 | `utils/prior/preflop.py` | Preflop `StateKey`, `preflop_feature_vector`, `PreflopPrior`, baseline training. |
 | `utils/prior/postflop.py` | `PostflopFeatures`, `PostflopPrior`, vectorized `action_probs_matrix` (Method D). |
@@ -42,13 +47,16 @@ Supervised training of `beta` uses only rows where the actor’s hole cards are 
 
 ```bash
 # Fit global baselines (example paths)
-python train.py pluribus/ --out artifacts/global_priors.json
+python -m runners.train pluribus/ --out artifacts/global_priors.json
 
 # Infer per-player theta (requires global_priors.json)
-python find_theta.py pluribus/ --global-priors artifacts/global_priors.json --out artifacts/player_thetas.json
+python -m runners.find_theta pluribus/ --global-priors artifacts/global_priors.json --out artifacts/player_thetas.json
+
+# Batch filtering (see command_filter.sh)
+python -m runners.filter_sessions -h
 ```
 
-Use `python train.py -h` and `python find_theta.py -h` for session filters, learning rates, EM iterations, and postflop equity MC sample counts.
+Use `python -m runners.train -h` and `python -m runners.find_theta -h` for session filters, learning rates, EM iterations, and postflop equity MC sample counts.
 
 ## Tests
 

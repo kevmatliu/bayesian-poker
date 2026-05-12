@@ -7,17 +7,17 @@ Preflop (169 abstract classes):
 Postflop (combo / features):
 
     P(a | x, theta) ∝ P_base(a | x) * exp(theta · u(x, a))
-
-Use ``TendencyEM`` as the namespace for phase-specific runners.
 """
 
 from __future__ import annotations
 
 from utils.em.common import (
-    EMPhase,
     M_STEP_GRAD_NORM_TOL,
     POSTFLOP_M_BATCH_SIZE,
     PREFLOP_M_BATCH_SIZE,
+    effective_sample_size,
+    max_effective_sample_size,
+    minibatch_plan,
     normalize_log_weights,
 )
 from utils.em.postflop import (
@@ -41,16 +41,7 @@ from utils.em.preflop import (
     run_preflop_em,
 )
 
-
-class TendencyEM:
-    """Phase-specific EM entry points (preflop vs postflop)."""
-
-    preflop = staticmethod(run_preflop_em)
-    postflop = staticmethod(run_postflop_theta_em)
-
-
 __all__ = [
-    "EMPhase",
     "M_STEP_GRAD_NORM_TOL",
     "POSTFLOP_M_BATCH_SIZE",
     "PREFLOP_M_BATCH_SIZE",
@@ -59,10 +50,12 @@ __all__ = [
     "PostflopThetaObservation",
     "PreflopEMDecision",
     "PreflopEMHandBundle",
-    "TendencyEM",
     "e_step_combo_posterior",
     "e_step_hand_class_posterior",
     "e_step_postflop_bundle",
+    "effective_sample_size",
+    "max_effective_sample_size",
+    "minibatch_plan",
     "m_step_theta_post_gradient_ascent",
     "m_step_theta_post_gradient_ascent_bundles",
     "normalize_log_weights",

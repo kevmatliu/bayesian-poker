@@ -1,4 +1,4 @@
-"""Preflop/postflop filtering and pair-EM orchestration (imported after ``runner.py`` sets ``sys.path``)."""
+"""Preflop/postflop filtering and pair-EM helpers used by ``runners.filter_sessions``."""
 
 from __future__ import annotations
 
@@ -11,9 +11,11 @@ from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 from utils.em import PreflopEMDecision, PreflopEMHandBundle, run_postflop_theta_em, run_preflop_em
 from utils.filter import ComboRangeFilter, PreflopRangeFilter, all_combo_keys
-from utils.filter.helpers import initial_class_prior, normalize
+from utils.filter.common import initial_class_prior, normalize
+from utils.action.postflop import PostflopActionModel
+from utils.action.preflop import PreflopActionModel, state_key_from_parse_state, theta_pre_from_phi
 from utils.prior.postflop import PostflopPrior
-from utils.prior.preflop import PreflopPrior, state_key_from_parse_state
+from utils.prior.preflop import PreflopPrior
 from utils.parse import Hand, Session
 from utils.postflop_runner_bridge import (
     collect_session_postflop_bundles_by_pair,
@@ -22,7 +24,7 @@ from utils.postflop_runner_bridge import (
     raw_action_bucket_to_postflop,
 )
 
-from runner_models import (
+from .models import (
     EMPostflopResult,
     EMPostflopRunConfig,
     EMPreflopResult,
@@ -235,27 +237,33 @@ def _compute_postflop_em_result(
     )
 
 
-def _learned_prior_for_pair(
+def _learned_preflop_model_for_pair(
     observer: str,
     target: str,
     theta_by_pair: Dict[str, List[float]],
-) -> Optional[PreflopPrior]:
+) -> Optional[PreflopActionModel]:
     key = f"{observer}|{target}"
     if key not in theta_by_pair:
         return None
-    return PreflopPrior(theta_pre=tuple(theta_by_pair[key]), floor=PREFLOP_PRIOR_FLOOR)
+    return PreflopActionModel(
+        PreflopPrior(floor=PREFLOP_PRIOR_FLOOR),
+        tuple(theta_by_pair[key]),
+    )
 
 
-def _learned_postflop_prior_for_pair(
+def _learned_postflop_model_for_pair(
     observer: str,
     target: str,
     theta_by_pair: Dict[str, List[float]],
     floor: float,
-) -> Optional[PostflopPrior]:
+) -> Optional[PostflopActionModel]:
     key = f"{observer}|{target}"
     if key not in theta_by_pair:
         return None
-    return PostflopPrior(theta_post=tuple(theta_by_pair[key]), floor=floor)
+    return PostflopActionModel(
+        PostflopPrior(floor=floor),
+        tuple(theta_by_pair[key]),
+    )
 
 
 def _fmt_filter_tag(filter_tag: str) -> str:
@@ -268,7 +276,7 @@ def _run_postflop_combo_filter_for_hand(
     target: str,
     hand_index: int,
     preflop_range: Dict[str, float],
-    learned_postflop_prior: Optional[PostflopPrior],
+    learned_postflop_model: Optional[PostflopActionModel],
     postflop_floor: float,
     top_k: int,
     street_end_snapshots: Optional[List[Tuple[str, Dict[str, float]]]] = None,
@@ -293,13 +301,18 @@ def _run_postflop_combo_filter_for_hand(
             len(target_actions),
         )
 
-    observer_hole = hand.hole_cards.get(observer, "") or ""
-    prior_model = learned_postflop_prior or PostflopPrior(floor=postflop_floor)
+    if learned_postflop_model is not None:
+        baseline_pf = learned_postflop_model.prior
+        theta_pf = learned_postflop_model.theta_post
+    else:
+        baseline_pf = PostflopPrior(floor=postflop_floor)
+        theta_pf = (0.0, 0.0, 0.0)
     combo_filter = ComboRangeFilter(
         observer_name=observer,
         target_name=target,
         observer_hole_cards=observer_hole,
-        prior_model=prior_model,
+        prior_model=baseline_pf,
+        theta_post=theta_pf,
     )
 
     decisions: List[PostflopDecision] = []
@@ -440,8 +453,8 @@ def _run_preflop_filter_for_hand(
     hand_index: int,
     phi: float,
     top_k: int,
-    learned_prior: Optional[PreflopPrior] = None,
-    learned_postflop_prior: Optional[PostflopPrior] = None,
+    learned_preflop_model: Optional[PreflopActionModel] = None,
+    learned_postflop_model: Optional[PostflopActionModel] = None,
     postflop_floor: float = 1e-6,
     street_end_snapshots: Optional[List[Tuple[str, Dict[str, float]]]] = None,
     *,
@@ -459,26 +472,31 @@ def _run_preflop_filter_for_hand(
         return None
 
     observer_hole_cards = hand.hole_cards.get(observer, "")
+    if learned_preflop_model is not None:
+        baseline = learned_preflop_model.prior
+        theta_pre = learned_preflop_model.theta_pre
+    else:
+        baseline = PreflopPrior()
+        theta_pre = theta_pre_from_phi(phi)
     preflop_filter = PreflopRangeFilter(
         observer_name=observer,
         target_name=target,
         observer_hole_cards=observer_hole_cards,
-        prior_model=learned_prior,
+        prior_model=baseline,
+        theta_pre=theta_pre,
     )
-    if learned_prior is None:
-        preflop_filter.phi = phi
 
     if filter_verbose:
         LOG.info(
             "%sFilter preflop start | hand_index=%d | %s observes %s | target_preflop_decisions=%d | "
-            "observer_holes_known=%s | learned_preflop_prior=%s",
+            "observer_holes_known=%s | learned_preflop_model=%s",
             tag,
             hand_index,
             observer,
             target,
             len(decisions),
             bool(observer_hole_cards),
-            learned_prior is not None,
+            learned_preflop_model is not None,
         )
 
     for i, decision in enumerate(decisions):
@@ -516,7 +534,7 @@ def _run_preflop_filter_for_hand(
             target=target,
             hand_index=hand_index,
             preflop_range=preflop_filter.range,
-            learned_postflop_prior=learned_postflop_prior,
+            learned_postflop_model=learned_postflop_model,
             postflop_floor=postflop_floor,
             top_k=top_k,
             street_end_snapshots=street_end_snapshots,
@@ -613,8 +631,8 @@ def _filter_hands_observer_target_grid(
             LOG.info("Preflop+combo filter hand %d/%d (phh index in session)", i + 1, nh)
         for observer in resolved_observers:
             for target in resolved_targets:
-                learned = _learned_prior_for_pair(observer, target, theta_by_pair)
-                learned_post = _learned_postflop_prior_for_pair(
+                learned = _learned_preflop_model_for_pair(observer, target, theta_by_pair)
+                learned_post = _learned_postflop_model_for_pair(
                     observer,
                     target,
                     pf_result.theta_post_by_pair,
@@ -627,8 +645,8 @@ def _filter_hands_observer_target_grid(
                     hand_index=hi,
                     phi=phi,
                     top_k=top_k,
-                    learned_prior=learned,
-                    learned_postflop_prior=learned_post,
+                    learned_preflop_model=learned,
+                    learned_postflop_model=learned_post,
                     postflop_floor=postflop_prior_floor,
                 )
                 if result is not None:

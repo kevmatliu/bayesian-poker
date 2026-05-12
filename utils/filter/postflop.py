@@ -4,14 +4,14 @@ from __future__ import annotations
 
 import math
 from itertools import combinations
-from typing import Dict, Iterable, List, Mapping, Optional, Tuple, Union
+from typing import Dict, Iterable, List, Mapping, Optional, Sequence, Tuple, Union
 
 import numpy as np
 
-from utils.filter.helpers import FilterStep, effective_sample_size, normalize
-from utils.prior.postflop import PostflopFeatures, PostflopPrior
-from utils.prior.preflop import StateKey
-from utils.strength.common import Card, all_52_cards, parse_card, parse_cards
+from utils.filter.common import FilterStep, effective_sample_size, normalize
+from utils.action.postflop import PostflopActionModel, PostflopFeatures, PostflopPrior
+from utils.action.preflop import StateKey
+from utils.parse import Card, all_52_cards, parse_card, parse_cards
 from utils.strength.preflop import all_169_classes, get_equivalence_class
 
 CardsLike = Union[str, Iterable[Card], Iterable[str], None]
@@ -108,8 +108,11 @@ class ComboRangeFilter:
     obtained from the post-flop multinomial-logit prior conditioned on the
     combo-derived made/draw features and the current betting state.
 
-    The filter is parametric in the post-flop prior model, so the same machinery
-    handles GTO baselines (zero ``theta_post``) and tilted player priors.
+    Likelihoods use ``prior_model``'s frozen ``beta`` matrices; ``theta_post``
+    on this filter is applied via :class:`PostflopActionModel` (same tilt as
+    :meth:`PostflopActionModel.action_probs_matrix_given_theta` with that
+    ``theta_post``). Pass a baseline :class:`PostflopPrior` only; tendency is
+    controlled through ``theta_post`` here.
     """
 
     def __init__(
@@ -119,6 +122,8 @@ class ComboRangeFilter:
         observer_hole_cards: CardsLike = "",
         board_cards: CardsLike = "",
         prior_model: Optional[PostflopPrior] = None,
+        *,
+        theta_post: Sequence[float] | None = None,
         initial_combo_dist: Optional[Mapping[str, float]] = None,
     ):
         self.observer_name = observer_name
@@ -126,6 +131,14 @@ class ComboRangeFilter:
         self.observer_cards: List[Card] = _coerce_cards(observer_hole_cards)
         self.board: List[Card] = _coerce_cards(board_cards)
         self.prior_model = prior_model or PostflopPrior()
+        if theta_post is None:
+            self._theta_post = (0.0, 0.0, 0.0)
+        else:
+            t = tuple(float(x) for x in theta_post)
+            if len(t) != 3:
+                raise ValueError("theta_post must have length 3 (fold, passive, aggression tilts).")
+            self._theta_post = t
+        self._action_model = PostflopActionModel(self.prior_model, self._theta_post)
         self.combos: Dict[str, float] = (
             normalize(dict(initial_combo_dist)) if initial_combo_dist else {}
         )
@@ -280,8 +293,8 @@ class ComboRangeFilter:
         current betting state and board. Combos with no entry are zeroed
         out. Internally we batch every live combo into a single
         ``(N, PHI_DIM)`` feature matrix and let
-        :meth:`PostflopPrior.action_probs_matrix` compute all action
-        likelihoods with one matmul + one softmax (Method D).
+        :meth:`PostflopPrior.action_probs_matrix_given_theta` apply the filter's
+        ``theta_post`` tilt with one matmul + softmax per batch (Method D).
         """
         if not self.combos:
             raise ValueError(
@@ -303,15 +316,15 @@ class ComboRangeFilter:
             live_feats.append(feat)
 
         if live_combos:
-            from utils.prior.postflop import feature_vector
+            from utils.action.postflop import feature_vector
 
-            phi = np.stack([feature_vector(f) for f in live_feats], axis=0)
+            feature_matrix = np.stack([feature_vector(f) for f in live_feats], axis=0)
             facing = np.fromiter(
                 (f.facing_bet for f in live_feats),
                 dtype=bool,
                 count=len(live_feats),
             )
-            probs_matrix = self.prior_model.action_probs_matrix(phi, facing)
+            probs_matrix = self._action_model.action_probs_matrix(feature_matrix, facing)
             action_col = probs_matrix[:, int(action_bucket)]
             prior_arr = np.asarray(live_probs, dtype=float)
             unnorm_arr = prior_arr * action_col

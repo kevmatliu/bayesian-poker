@@ -1,4 +1,4 @@
-"""Shared types for action priors, tendencies, and inference phase."""
+"""Shared types for action models, tendencies, and inference phase."""
 
 from __future__ import annotations
 
@@ -6,8 +6,8 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Optional, Tuple
 
-from utils.prior.postflop import PostflopPrior
-from utils.prior.preflop import PreflopPrior
+from utils.action.postflop import PostflopActionModel, PostflopPrior
+from utils.action.preflop import PreflopActionModel, PreflopPrior
 
 
 class InferencePhase(Enum):
@@ -27,15 +27,27 @@ class TendencyTheta:
 
 @dataclass
 class ActionPrior:
-    """Tags preflop vs postflop distribution family (multinomial-logit baselines + tilt)."""
+    """Tags preflop vs postflop distribution family (baseline ``*Prior`` + ``theta``)."""
 
     phase: InferencePhase
     model: object
 
     @classmethod
-    def preflop(cls, prior: Optional[PreflopPrior] = None) -> ActionPrior:
-        return cls(InferencePhase.PREFLOP, prior or PreflopPrior())
+    def preflop(
+        cls,
+        prior: Optional[PreflopPrior] = None,
+        *,
+        theta_pre: Tuple[float, float, float] = (0.0, 0.0, 0.0),
+    ) -> ActionPrior:
+        p = prior or PreflopPrior()
+        return cls(InferencePhase.PREFLOP, PreflopActionModel(p, theta_pre))
 
     @classmethod
-    def postflop(cls, prior: Optional[PostflopPrior] = None) -> ActionPrior:
-        return cls(InferencePhase.POSTFLOP, prior or PostflopPrior())
+    def postflop(
+        cls,
+        prior: Optional[PostflopPrior] = None,
+        *,
+        theta_post: Tuple[float, float, float] = (0.0, 0.0, 0.0),
+    ) -> ActionPrior:
+        p = prior or PostflopPrior()
+        return cls(InferencePhase.POSTFLOP, PostflopActionModel(p, theta_post))

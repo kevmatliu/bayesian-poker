@@ -22,7 +22,7 @@ from pipeline_common import (
     preflop_phi_column_labels,
     read_session_names_file,
 )
-from utils.prior.postflop import (
+from utils.action.postflop import (
     CALL,
     FOLD as PF_FOLD_POST,
     PHI_DIM,
@@ -31,7 +31,7 @@ from utils.prior.postflop import (
     train_baseline_facing_bet,
     train_baseline_no_bet,
 )
-from utils.prior.preflop import (
+from utils.action.preflop import (
     CHECK_CALL,
     FOLD,
     HEURISTIC_BETA_PREFLOP,

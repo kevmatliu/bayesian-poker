@@ -6,11 +6,14 @@ import unittest
 
 import numpy as np
 
-from utils.prior.postflop import (
+from typing import Tuple
+
+from utils.action.postflop import (
     CALL,
     FOLD,
     PHI_DIM,
     RAISE,
+    PostflopActionModel,
     PostflopFeatures,
     PostflopPrior,
     feature_vector,
@@ -57,6 +60,10 @@ def _feat_no_bet(m: float = 0.5, d: float = 0.4) -> PostflopFeatures:
     )
 
 
+def _m(prior: PostflopPrior, theta: Tuple[float, float, float] = (0.0, 0.0, 0.0)) -> PostflopActionModel:
+    return PostflopActionModel(prior, theta)
+
+
 class TestPostflopPrior(unittest.TestCase):
     def test_legal_actions_facing(self) -> None:
         f = _feat_facing()
@@ -79,41 +86,45 @@ class TestPostflopPrior(unittest.TestCase):
         self.assertEqual(set(probs.keys()), {CALL, RAISE})
 
     def test_action_probs_sum_to_one(self) -> None:
-        p = PostflopPrior(theta_post=(0.2, -0.1, 0.05), floor=0.0)
-        probs = p.action_probs(_feat_facing())
+        m = _m(PostflopPrior(floor=0.0), (0.2, -0.1, 0.05))
+        probs = m.action_probs(_feat_facing())
         self.assertAlmostEqual(sum(probs.values()), 1.0, places=6)
 
     def test_theta_zero_matches_base(self) -> None:
-        p = PostflopPrior(theta_post=(0.0, 0.0, 0.0), floor=0.0)
+        p = PostflopPrior(floor=0.0)
+        m = _m(p, (0.0, 0.0, 0.0))
         f = _feat_facing()
         base = p.base_probs(f)
-        tilted = p.action_probs(f)
+        tilted = m.action_probs(f)
         for a in base:
             self.assertAlmostEqual(tilted[a], base[a], places=6)
 
     def test_fold_theta_increases_fold_when_facing(self) -> None:
         f = _feat_facing(m=0.35, d=0.25)
-        p0 = PostflopPrior(theta_post=(0.0, 0.0, 0.0), floor=0.0)
-        p1 = PostflopPrior(theta_post=(0.4, 0.0, 0.0), floor=0.0)
+        p = PostflopPrior(floor=0.0)
+        p0 = _m(p, (0.0, 0.0, 0.0))
+        p1 = _m(p, (0.4, 0.0, 0.0))
         self.assertGreater(p1.action_probs(f)[FOLD], p0.action_probs(f)[FOLD])
 
     def test_call_theta_increases_call(self) -> None:
         f = _feat_facing(m=0.55, d=0.3)
-        p0 = PostflopPrior(theta_post=(0.0, 0.0, 0.0), floor=0.0)
-        p1 = PostflopPrior(theta_post=(0.0, 0.35, 0.0), floor=0.0)
+        p = PostflopPrior(floor=0.0)
+        p0 = _m(p, (0.0, 0.0, 0.0))
+        p1 = _m(p, (0.0, 0.35, 0.0))
         self.assertGreater(p1.action_probs(f)[CALL], p0.action_probs(f)[CALL])
 
     def test_raise_theta_increases_raise(self) -> None:
         f = _feat_no_bet(m=0.6, d=0.35)
-        p0 = PostflopPrior(theta_post=(0.0, 0.0, 0.0), floor=0.0)
-        p1 = PostflopPrior(theta_post=(0.0, 0.0, 0.45), floor=0.0)
+        p = PostflopPrior(floor=0.0)
+        p0 = _m(p, (0.0, 0.0, 0.0))
+        p1 = _m(p, (0.0, 0.0, 0.45))
         self.assertGreater(p1.action_probs(f)[RAISE], p0.action_probs(f)[RAISE])
 
     def test_no_bet_fold_probability_zero(self) -> None:
-        p = PostflopPrior(floor=0.0)
+        m = _m(PostflopPrior(floor=0.0), (0.0, 0.0, 0.0))
         f = _feat_no_bet()
-        self.assertEqual(p.action_probability(f, FOLD), 0.0)
-        self.assertNotIn(FOLD, p.action_probs(f))
+        self.assertEqual(m.action_probability(f, FOLD), 0.0)
+        self.assertNotIn(FOLD, m.action_probs(f))
 
     def test_em_gradient_shape_finite(self) -> None:
         feat = _feat_facing()
@@ -137,8 +148,8 @@ class TestPostflopPrior(unittest.TestCase):
             ),
             initial_combo_range={"AhKh": 0.5, "QsJs": 0.5},
         )
-        prior = PostflopPrior(theta_post=(0.0, 0.0, 0.0), floor=0.0)
-        q = e_step_postflop_bundle(bundle, prior)
+        model = _m(PostflopPrior(floor=0.0), (0.0, 0.0, 0.0))
+        q = e_step_postflop_bundle(bundle, model)
         self.assertAlmostEqual(sum(q.values()), 1.0, places=6)
         self.assertAlmostEqual(q["AhKh"], 0.5, places=5)
         self.assertAlmostEqual(q["QsJs"], 0.5, places=5)
@@ -187,50 +198,48 @@ class TestPostflopPriorBatchAPI(unittest.TestCase):
         return feats
 
     def test_action_probs_matrix_matches_per_row(self) -> None:
-        from utils.prior.postflop import feature_vector
-
-        prior = PostflopPrior(theta_post=(0.2, -0.1, 0.3), floor=1e-4)
+        prior = PostflopPrior(floor=1e-4)
+        model = _m(prior, (0.2, -0.1, 0.3))
         feats = self._build_random_features(n=64, seed=1)
         phi = np.stack([feature_vector(f) for f in feats], axis=0)
         facing = np.array([f.facing_bet for f in feats], dtype=bool)
 
-        batch = prior.action_probs_matrix(phi, facing)
+        batch = model.action_probs_matrix(phi, facing)
         max_diff = 0.0
         for i, f in enumerate(feats):
-            row = prior.action_probs(f)
+            row = model.action_probs(f)
             ref = np.array([row.get(0, 0.0), row.get(1, 0.0), row.get(2, 0.0)])
             max_diff = max(max_diff, float(np.max(np.abs(ref - batch[i]))))
         self.assertLess(max_diff, 1e-12)
 
     def test_action_probs_matrix_floor_zero(self) -> None:
-        from utils.prior.postflop import feature_vector
-
-        prior = PostflopPrior(theta_post=(0.0, 0.0, 0.0), floor=0.0)
+        prior = PostflopPrior(floor=0.0)
+        model = _m(prior, (0.0, 0.0, 0.0))
         feats = self._build_random_features(n=32, seed=2)
         phi = np.stack([feature_vector(f) for f in feats], axis=0)
         facing = np.array([f.facing_bet for f in feats], dtype=bool)
-        batch = prior.action_probs_matrix(phi, facing)
+        batch = model.action_probs_matrix(phi, facing)
         for i, f in enumerate(feats):
-            row = prior.action_probs(f)
+            row = model.action_probs(f)
             ref = np.array([row.get(0, 0.0), row.get(1, 0.0), row.get(2, 0.0)])
             self.assertTrue(np.allclose(batch[i], ref, atol=1e-12))
         # FOLD column must be exactly zero on no-bet rows.
         no_bet_idx = ~facing
         self.assertTrue(np.all(batch[no_bet_idx, 0] == 0.0))
 
-    def test_legacy_beta_shape_auto_padded(self) -> None:
+    def test_short_phi_dim_beta_auto_padded(self) -> None:
         """A 13-column beta loaded from disk should pad up to PHI_DIM."""
-        legacy_facing = np.random.default_rng(0).normal(size=(3, 13))
-        legacy_no_bet = np.random.default_rng(1).normal(size=(2, 13))
+        facing_13 = np.random.default_rng(0).normal(size=(3, 13))
+        no_bet_13 = np.random.default_rng(1).normal(size=(2, 13))
         prior = PostflopPrior(
-            beta_facing=legacy_facing,
-            beta_no_bet=legacy_no_bet,
+            beta_facing=facing_13,
+            beta_no_bet=no_bet_13,
         )
         self.assertEqual(prior.beta_facing_matrix.shape, (3, PHI_DIM))
         self.assertEqual(prior.beta_no_bet_matrix.shape, (2, PHI_DIM))
         # The first 13 columns are preserved verbatim.
         np.testing.assert_allclose(
-            prior.beta_facing_matrix[:, :13], legacy_facing
+            prior.beta_facing_matrix[:, :13], facing_13
         )
         np.testing.assert_allclose(
             prior.beta_facing_matrix[:, 13:], 0.0

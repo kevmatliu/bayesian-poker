@@ -1,4 +1,4 @@
-"""Preflop EM over abstract hand classes (169) and theta_pre."""
+"""Preflop EM: posterior over 169 abstract hand classes and ``theta_pre``."""
 
 from __future__ import annotations
 
@@ -13,16 +13,20 @@ import numpy as np
 from utils.em.common import (
     M_STEP_GRAD_NORM_TOL,
     PREFLOP_M_BATCH_SIZE,
+    effective_sample_size,
+    max_effective_sample_size,
+    minibatch_plan,
     normalize_log_weights,
 )
-
-LOG = logging.getLogger(__name__)
-from utils.prior.preflop import (
+from utils.action.preflop import (
     ACTION_BUCKETS,
-    PreflopPrior,
+    PreflopActionModel,
     canonical_preflop_action,
 )
+from utils.prior.preflop import PreflopPrior
 from utils.strength.preflop import all_169_classes
+
+LOG = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -38,8 +42,8 @@ class PreflopEMHandBundle:
     """Target decisions in one hand plus the observer-implied prior over hand classes.
 
     ``initial_range`` is a distribution over the 169 abstract labels (not combos).
-    It is typically :func:`utils.filter.helpers.normalize` of
-    :func:`utils.filter.helpers.initial_class_prior` with the observer's hole
+    It is typically :func:`utils.filter.common.normalize` of
+    :func:`utils.filter.common.initial_class_prior` with the observer's hole
     cards removed from support.
     """
 
@@ -49,14 +53,9 @@ class PreflopEMHandBundle:
 
 def e_step_hand_class_posterior(
     bundle: PreflopEMHandBundle,
-    prior: PreflopPrior,
+    model: PreflopActionModel,
 ) -> Dict[str, float]:
-    """Posterior ``q(h) ∝ pi_0(h) * prod_t P(a_t | h, s_t, theta)`` over 169 classes.
-
-    Loops all classes with positive prior mass; fine for 169 but intentionally
-    simple. Uses :meth:`PreflopPrior.action_probs` which includes both ``beta``
-    and the current ``theta_pre``.
-    """
+    """Posterior ``q(h) ∝ pi_0(h) * prod_t P(a_t | h, s_t, theta)`` over 169 classes."""
     log_q: Dict[str, float] = {}
     for h in all_169_classes():
         p0 = bundle.initial_range.get(h, 0.0)
@@ -64,7 +63,7 @@ def e_step_hand_class_posterior(
             continue
         logp = math.log(p0)
         for dec in bundle.decisions:
-            probs = prior.action_probs(h, dec.state_key)
+            probs = model.action_probs(h, dec.state_key)
             a = canonical_preflop_action(dec.action_bucket)
             logp += math.log(probs[a])
         log_q[h] = logp
@@ -73,16 +72,56 @@ def e_step_hand_class_posterior(
     return normalize_log_weights(log_q)
 
 
-def _q_by_hand_ess_max(q_by_hand: Sequence[Mapping[str, float]]) -> float:
-    """Max per-bundle ESS for ``q(h)`` (same formula as jsonl/history_hook)."""
-    ess_max = 0.0
-    for qmap in q_by_hand:
-        qs = list(qmap.values())
-        if not qs:
-            continue
-        ess = (sum(qs) ** 2) / sum(v * v for v in qs)
-        ess_max = max(ess_max, float(ess))
-    return ess_max
+def _accumulate_theta_pre_grad(
+    bundles: List[PreflopEMHandBundle],
+    q_by_hand: List[Dict[str, float]],
+    batch_ix: np.ndarray,
+    baseline: PreflopPrior,
+    tilt_eval: PreflopActionModel,
+    theta: np.ndarray,
+    *,
+    scale: float,
+    profile_first_iter: bool,
+) -> Tuple[np.ndarray, float, float, float]:
+    """One M-step gradient over selected bundle indices.
+
+    Returns ``(grad, probs_s, utils_s, accum_s)`` where the last three are
+    first-iteration profiling times (seconds), zero when not profiling.
+    """
+    grad = np.zeros(3, dtype=float)
+    t_probs = t_utils = t_accum = 0.0
+    for bi in batch_ix:
+        bundle = bundles[int(bi)]
+        q_h = q_by_hand[int(bi)]
+        for dec in bundle.decisions:
+            observed_a = canonical_preflop_action(dec.action_bucket)
+            for hand_class, q in q_h.items():
+                if q <= 0.0:
+                    continue
+                if profile_first_iter:
+                    t0 = time.perf_counter()
+                probs = tilt_eval.action_probs_given_theta(
+                    hand_class=hand_class,
+                    state_key=dec.state_key,
+                    theta_pre=theta,
+                )
+                if profile_first_iter:
+                    t_probs += time.perf_counter() - t0
+                    t0 = time.perf_counter()
+                utilities = baseline.action_utility_vectors(hand_class, dec.state_key)
+                if profile_first_iter:
+                    t_utils += time.perf_counter() - t0
+                    t0 = time.perf_counter()
+                u_obs = np.asarray(utilities[observed_a], dtype=float)
+                exp_u = sum(
+                    probs[a] * np.asarray(utilities[a], dtype=float)
+                    for a in ACTION_BUCKETS
+                )
+                grad += q * (u_obs - exp_u)
+                if profile_first_iter:
+                    t_accum += time.perf_counter() - t0
+    grad *= scale
+    return grad, t_probs, t_utils, t_accum
 
 
 def m_step_theta_pre(
@@ -98,30 +137,24 @@ def m_step_theta_pre(
     m_step_seed: Optional[int] = None,
     grad_norm_tol: float = M_STEP_GRAD_NORM_TOL,
 ) -> Tuple[np.ndarray, int]:
-    """Gradient ascent on the M-step objective with L2 penalty on theta_pre.
+    """Gradient ascent on the M-step objective with L2 penalty on ``theta_pre``.
 
-    Returns ``(theta, m_iterations_used)`` where ``m_iterations_used`` is the number of
-    gradient steps taken (including early stop).
+    Returns ``(theta, m_iterations_used)`` (gradient steps, including early stop).
 
-    Logs a final ``Preflop EM M-step runtime`` line: coarse per-iteration timings plus a
-    split of the **first** gradient step between ``action_probs_with_theta``,
-    ``action_utility_vectors``, and inner accumulation (Profiling inner steps on every
-    iteration would dominate wall time).
-
-    Minibatching: each gradient step samples ``min(m_batch_size, n_bundles)`` bundle
-    indices without replacement and scales the batch gradient by ``n_bundles / batch``
-    so the update is an unbiased stochastic gradient for the **sum** over bundles.
-    Use ``m_batch_size <= 0`` or ``>= n_bundles`` for full-batch ascent (deterministic).
+    Minibatching: each step samples ``min(m_batch_size, n_bundles)`` indices
+    without replacement and scales the batch gradient by ``n_bundles / batch``
+    for an unbiased stochastic gradient of the **sum** over bundles.
+    ``m_batch_size <= 0`` or ``>= n_bundles`` yields full-batch ascent.
     """
     theta = np.asarray(theta_init, dtype=float).copy()
     baseline = PreflopPrior(
-        theta_pre=(0.0, 0.0, 0.0),
         floor=prior_template.floor,
-        beta_preflop=prior_template._beta_store.copy(),
+        beta_preflop=prior_template.beta_preflop_matrix.copy(),
     )
+    tilt_eval = PreflopActionModel(baseline, (0.0, 0.0, 0.0))
 
     t_ess0 = time.perf_counter()
-    ess_max = _q_by_hand_ess_max(q_by_hand)
+    ess_max = max_effective_sample_size(q_by_hand)
     ess_setup_s = time.perf_counter() - t_ess0
 
     n_inner_per_grad = sum(
@@ -134,64 +167,39 @@ def m_step_theta_pre(
 
     n_bundles = len(bundles)
     rng = np.random.default_rng(m_step_seed)
-    if m_batch_size <= 0 or m_batch_size >= n_bundles:
-        bundle_batch_cap = n_bundles
-        use_minibatch = False
-    else:
-        bundle_batch_cap = int(m_batch_size)
-        use_minibatch = True
+    use_minibatch = m_batch_size > 0 and m_batch_size < n_bundles
+    bundle_batch_cap = (
+        n_bundles if not use_minibatch else min(int(m_batch_size), n_bundles)
+    )
 
     used = steps
     t_m0 = time.perf_counter()
     sum_grad_loop_s = 0.0
     sum_iter_tail_s = 0.0
-    # Fine-grained timers for the first gradient step only (see action_probs_with_theta / utilities).
     first_iter_probs_s = 0.0
     first_iter_utils_s = 0.0
     first_iter_accum_s = 0.0
+
     for step_i in range(steps):
         t_loop0 = time.perf_counter()
-        grad = np.zeros(3, dtype=float)
         profile_first = step_i == 0
         if use_minibatch:
-            bsz = min(bundle_batch_cap, n_bundles)
-            batch_ix = rng.choice(n_bundles, size=bsz, replace=False)
-            scale = n_bundles / float(bsz)
+            batch_ix, scale, _ = minibatch_plan(n_bundles, m_batch_size, rng)
         else:
-            batch_ix = np.arange(n_bundles, dtype=int)
-            scale = 1.0
+            batch_ix, scale = np.arange(n_bundles, dtype=int), 1.0
 
-        for bi in batch_ix:
-            bundle = bundles[int(bi)]
-            q_h = q_by_hand[int(bi)]
-            for dec in bundle.decisions:
-                observed_a = canonical_preflop_action(dec.action_bucket)
-                for hand_class, q in q_h.items():
-                    if q <= 0.0:
-                        continue
-                    if profile_first:
-                        t0 = time.perf_counter()
-                    probs = prior_template.action_probs_with_theta(
-                        hand_class=hand_class,
-                        state_key=dec.state_key,
-                        theta_pre=theta,
-                    )
-                    if profile_first:
-                        first_iter_probs_s += time.perf_counter() - t0
-                        t0 = time.perf_counter()
-                    utilities = baseline.action_utility_vectors(hand_class, dec.state_key)
-                    if profile_first:
-                        first_iter_utils_s += time.perf_counter() - t0
-                        t0 = time.perf_counter()
-                    u_obs = np.asarray(utilities[observed_a], dtype=float)
-                    exp_u = sum(
-                        probs[a] * np.asarray(utilities[a], dtype=float)
-                        for a in ACTION_BUCKETS
-                    )
-                    grad += q * (u_obs - exp_u)
-                    if profile_first:
-                        first_iter_accum_s += time.perf_counter() - t0
-        grad *= scale
+        grad, tp, tu, ta = _accumulate_theta_pre_grad(
+            bundles,
+            q_by_hand,
+            batch_ix,
+            baseline,
+            tilt_eval,
+            theta,
+            scale=scale,
+            profile_first_iter=profile_first,
+        )
+        if profile_first:
+            first_iter_probs_s, first_iter_utils_s, first_iter_accum_s = tp, tu, ta
         sum_grad_loop_s += time.perf_counter() - t_loop0
 
         t_tail0 = time.perf_counter()
@@ -266,6 +274,49 @@ def m_step_theta_pre(
     return theta, used
 
 
+def _preflop_jsonl_e_step_records(
+    history_hook: Callable[[Dict[str, Any]], None],
+    bundles: List[PreflopEMHandBundle],
+    last_q: List[Dict[str, float]],
+    theta: np.ndarray,
+    outer: int,
+    bundle_meta: Optional[Sequence[Mapping[str, Any]]],
+) -> int:
+    """Subsampling + per-bundle ``preflop_e_step`` rows; returns ``e_step_subsample_stride``."""
+    nb = len(bundles)
+    e_stride = 1
+    if nb > 2000:
+        e_stride = max(1, nb // 2000)
+        LOG.info(
+            "Preflop EM | jsonl subsample: recording preflop_e_step every %d bundle(s) "
+            "(n_bundles=%d; avoids millions of disk flushes)",
+            e_stride,
+            nb,
+        )
+    for bi, (bundle, qmap) in enumerate(zip(bundles, last_q)):
+        if bi != 0 and bi != nb - 1 and bi % e_stride != 0:
+            continue
+        meta: Dict[str, Any] = {}
+        if bundle_meta is not None and bi < len(bundle_meta):
+            meta = dict(bundle_meta[bi])
+        q_vals = list(qmap.values())
+        history_hook(
+            {
+                "kind": "preflop_e_step",
+                "em_outer": outer,
+                "em_timestep": outer,
+                "bundle_index": bi,
+                "e_step_subsample_stride": e_stride,
+                "n_target_preflop_decisions": len(bundle.decisions),
+                "theta_pre": [float(x) for x in theta],
+                "max_q": float(max(qmap.values())) if qmap else None,
+                "ess": float(effective_sample_size(q_vals)),
+                **meta,
+            }
+        )
+    return e_stride
+
+
 def run_preflop_em(
     bundles: List[PreflopEMHandBundle],
     *,
@@ -282,26 +333,20 @@ def run_preflop_em(
     history_hook: Optional[Callable[[Dict[str, Any]], None]] = None,
     bundle_meta: Optional[Sequence[Mapping[str, Any]]] = None,
 ) -> Tuple[np.ndarray, List[Dict[str, float]]]:
-    """Run outer EM iterations over preflop bundles; return ``theta_pre`` and last ``q(h)``.
-
-    Each outer iteration: (1) E-step per bundle with the current
-    :class:`utils.prior.preflop.PreflopPrior`; (2) M-step via
-    :func:`m_step_theta_pre` holding ``beta_preflop`` fixed. Optional
-    ``history_hook`` receives JSON-serializable dicts for logging / jsonl.
-    """
+    """Outer EM over preflop bundles; return ``theta_pre`` and final ``q(h)`` per bundle."""
     theta = (
         np.zeros(3, dtype=float)
         if theta_init is None
         else np.asarray(theta_init, dtype=float).copy()
     )
     if beta_preflop is None:
-        prior = PreflopPrior(theta_pre=tuple(float(x) for x in theta), floor=prior_floor)
+        baseline_prior = PreflopPrior(floor=prior_floor)
     else:
-        prior = PreflopPrior(
-            theta_pre=tuple(float(x) for x in theta),
+        baseline_prior = PreflopPrior(
             floor=prior_floor,
             beta_preflop=np.asarray(beta_preflop, dtype=float),
         )
+    model = PreflopActionModel(baseline_prior, tuple(float(x) for x in theta))
     last_q: List[Dict[str, float]] = []
 
     for outer in range(num_em_iters):
@@ -324,7 +369,7 @@ def run_preflop_em(
         prog = max(1, nb // 20) if nb > 20 else 1
         last_q = []
         for bi, b in enumerate(bundles):
-            last_q.append(e_step_hand_class_posterior(b, prior))
+            last_q.append(e_step_hand_class_posterior(b, model))
             if bi == 0 or bi == nb - 1 or (bi + 1) % prog == 0:
                 LOG.info(
                     "Preflop EM E-step | outer %d/%d | bundle %d/%d",
@@ -343,37 +388,9 @@ def run_preflop_em(
         )
 
         if history_hook is not None:
-            e_stride = 1
-            if nb > 2000:
-                e_stride = max(1, nb // 2000)
-                LOG.info(
-                    "Preflop EM | jsonl subsample: recording preflop_e_step every %d bundle(s) "
-                    "(n_bundles=%d; avoids millions of disk flushes)",
-                    e_stride,
-                    nb,
-                )
-            for bi, (bundle, qmap) in enumerate(zip(bundles, last_q)):
-                if bi != 0 and bi != nb - 1 and bi % e_stride != 0:
-                    continue
-                meta: Dict[str, Any] = {}
-                if bundle_meta is not None and bi < len(bundle_meta):
-                    meta = dict(bundle_meta[bi])
-                qs = list(qmap.values())
-                ess = (sum(qs) ** 2) / sum(v * v for v in qs) if qs else 0.0
-                history_hook(
-                    {
-                        "kind": "preflop_e_step",
-                        "em_outer": outer,
-                        "em_timestep": outer,
-                        "bundle_index": bi,
-                        "e_step_subsample_stride": e_stride,
-                        "n_target_preflop_decisions": len(bundle.decisions),
-                        "theta_pre": [float(x) for x in theta],
-                        "max_q": float(max(qmap.values())) if qmap else None,
-                        "ess": float(ess),
-                        **meta,
-                    }
-                )
+            e_stride = _preflop_jsonl_e_step_records(
+                history_hook, bundles, last_q, theta, outer, bundle_meta
+            )
             history_hook(
                 {
                     "kind": "preflop_e_step_finished",
@@ -414,7 +431,7 @@ def run_preflop_em(
         theta, m_grad_iters = m_step_theta_pre(
             bundles,
             last_q,
-            prior_template=prior,
+            prior_template=baseline_prior,
             theta_init=theta,
             l2=m_l2,
             lr=m_lr,
@@ -423,14 +440,7 @@ def run_preflop_em(
             m_step_seed=m_step_seed,
             grad_norm_tol=m_grad_norm_tol,
         )
-        if beta_preflop is None:
-            prior = PreflopPrior(theta_pre=tuple(float(x) for x in theta), floor=prior_floor)
-        else:
-            prior = PreflopPrior(
-                theta_pre=tuple(float(x) for x in theta),
-                floor=prior_floor,
-                beta_preflop=np.asarray(beta_preflop, dtype=float),
-            )
+        model = PreflopActionModel(baseline_prior, tuple(float(x) for x in theta))
         LOG.info(
             "Preflop EM outer %d/%d complete | theta_pre=[%.6f, %.6f, %.6f] | M-step grad iters used=%d/%d",
             outer + 1,

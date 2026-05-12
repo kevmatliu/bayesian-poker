@@ -11,10 +11,10 @@ import numpy as np
 PostflopStrengthBundle = Tuple[float, float, np.ndarray, float]
 
 from utils.em import PostflopEMHandBundle, PostflopEMTimestep, PostflopThetaObservation
-from utils.filter.helpers import initial_class_prior, normalize
+from utils.filter.common import initial_class_prior, normalize
 from utils.filter.postflop import ComboRangeFilter, combo_key, parse_combo_key
-from utils.prior.postflop import CALL, FOLD, PostflopFeatures, RAISE
-from utils.strength.common import Card, parse_cards
+from utils.action.postflop import CALL, FOLD, PostflopFeatures, RAISE
+from utils.parse import Card, parse_cards
 from utils.strength.fast_eval import (
     card_to_index,
     combo_key_from_indices,
@@ -46,7 +46,7 @@ def postflop_target_decisions_for_hand(hand, target: str) -> List[Tuple[str, int
 
 
 def raw_action_bucket_to_postflop(bucket: int) -> int:
-    """Collapse preflop-style buckets (0–4) to FOLD/CALL/RAISE."""
+    """Map stored preflop buckets (0=fold, 1=call/check, 2+=raise) to postflop FOLD/CALL/RAISE."""
     if bucket == 0:
         return FOLD
     if bucket == 1:
@@ -163,8 +163,8 @@ def features_from_context(
     ``rich`` (Method A) carries the board-relative categorical
     indicators produced by :func:`utils.strength.postflop.hand_feature_vector`,
     and ``equity`` (Method E) is the expected made percentile over future
-    runouts. Both default to neutral values so legacy callers that only
-    know ``(made, draw)`` still produce a valid feature row.
+    runouts. Both default to neutral values so callers that only
+    supply ``(made, draw)`` still produce a valid feature row.
     """
     return PostflopFeatures(
         made=float(made),

@@ -12,7 +12,7 @@ from utils.eval.brier import (
     multiclass_brier,
 )
 from utils.filter import all_combo_keys, combo_key
-from utils.strength.common import parse_card
+from utils.parse import parse_card
 from utils.strength.preflop import all_169_classes, get_equivalence_class
 
 

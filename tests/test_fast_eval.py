@@ -22,7 +22,7 @@ from itertools import combinations
 import numpy as np
 
 from utils.filter.postflop import combo_key as legacy_combo_key
-from utils.strength.common import all_52_cards, parse_card, parse_cards
+from utils.parse import all_52_cards, parse_card, parse_cards
 from utils.strength.fast_eval import (
     _per_board_state,
     _rank_batch,

@@ -4,11 +4,12 @@ from __future__ import annotations
 
 from collections import Counter
 from itertools import combinations
-from typing import Dict, Iterable, List, Optional, Set, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 
-from utils.strength.common import Card, StrengthMode, all_52_cards, parse_cards
+from utils.parse import Card, parse_cards
+from utils.strength.common import StrengthMode
 from utils.strength.fast_eval import (
     card_to_index,
     combo_key_from_indices,
@@ -16,7 +17,6 @@ from utils.strength.fast_eval import (
     made_percentile_array,
     made_percentile_at_combo_key,
     made_percentile_by_combo_key,
-    parse_board_indices,
     rollout_equity_by_combo_key,
 )
 
@@ -41,11 +41,6 @@ def is_straight(values: List[int]) -> Tuple[bool, int]:
         return True, 5
 
     return False, 0
-
-
-def _remaining_deck(dead: Iterable[Card]) -> List[Card]:
-    dset = set(dead)
-    return [c for c in all_52_cards() if c not in dset]
 
 
 def evaluate_5(cards: List[Card]) -> Tuple[int, List[int], str]:
@@ -446,7 +441,6 @@ def combo_postflop_features_for_board(
 
 
 def strength_bucket_from_percentiles(made_p: float, draw_s: float) -> str:
-    """Map continuous made/draw scores to discrete buckets for legacy filters."""
     if made_p >= 0.93:
         return "nuts/near-nuts"
     if made_p >= 0.80:

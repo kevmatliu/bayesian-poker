@@ -7,17 +7,17 @@
 #
 # - First two args: pluribus root (default: pluribus) and sessions list file (default: sessions_filter.txt).
 # - Next args (optional): up to six distinct player names (default: MrBlue Bill Pluribus).
-# - Use -- before any extra flags for runner.py (e.g. --json-out).
+# - Use -- before any extra flags for the Python module (e.g. --json-out).
 #
 # Examples:
 #   ./command_filter.sh
-#   ./command_filter.sh pluribus sessions_filter.txt
-#   ./command_filter.sh pluribus sessions_filter.txt Alice Bob Carol
-#   ./command_filter.sh pluribus sessions_filter.txt P1 P2 P3 P4 -- --json-out out.json
+#   ./command_filter.sh pluribus sessions_split/sessions_filter.txt
+#   ./command_filter.sh pluribus sessions_split/sessions_filter.txt Alice Bob Carol
+#   ./command_filter.sh pluribus sessions_split/sessions_filter.txt P1 P2 P3 P4 -- --json-out out.json
 set -euo pipefail
 
 ROOT="${1:-pluribus}"
-SESSIONS_FILE="${2:-sessions_filter.txt}"
+SESSIONS_FILE="${2:-sessions_split/sessions_filter.txt}"
 
 if (($# >= 2)); then shift 2
 elif (($# >= 1)); then shift 1
@@ -39,7 +39,7 @@ fi
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
-exec .venv/bin/python runner.py filter-sessions "$ROOT" \
+exec .venv/bin/python -m runners.filter_sessions "$ROOT" \
   --sessions-file "$SESSIONS_FILE" \
   --players "${PLAYERS[@]}" \
   --global-priors artifacts/global_priors.json \

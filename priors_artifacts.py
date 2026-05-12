@@ -1,12 +1,14 @@
-"""Build :class:`PreflopPrior` / :class:`PostflopPrior` from ``train.py`` / ``find_theta.py`` JSON artifacts."""
+"""Build :class:`PreflopActionModel` / :class:`PostflopActionModel` from training / θ JSON artifacts."""
 
 from __future__ import annotations
 
 from pathlib import Path
 from typing import Any, Mapping, Tuple
 
-from find_theta import load_global_priors
-from runner_models import PREFLOP_PRIOR_FLOOR
+from runners.find_theta import load_global_priors
+from runners.models import PREFLOP_PRIOR_FLOOR
+from utils.action.postflop import PostflopActionModel
+from utils.action.preflop import PreflopActionModel
 from utils.prior.postflop import PostflopPrior
 from utils.prior.preflop import PreflopPrior
 
@@ -18,7 +20,7 @@ def preflop_postflop_priors_for_target(
     *,
     preflop_floor: float = PREFLOP_PRIOR_FLOOR,
     postflop_floor: float = 1e-6,
-) -> Tuple[PreflopPrior, PostflopPrior]:
+) -> Tuple[PreflopActionModel, PostflopActionModel]:
     """Population ``beta`` from ``global_priors_path``; per-target ``theta_*`` from ``players_block``."""
     beta_preflop, beta_facing, beta_no_bet = load_global_priors(Path(global_priors_path))
     if target not in players_block:
@@ -30,15 +32,16 @@ def preflop_postflop_priors_for_target(
     tp = entry["theta_pre"]
     ts = entry["theta_post"]
     return (
-        PreflopPrior(
-            theta_pre=tuple(float(x) for x in tp),
-            floor=preflop_floor,
-            beta_preflop=beta_preflop,
+        PreflopActionModel(
+            PreflopPrior(floor=preflop_floor, beta_preflop=beta_preflop),
+            tuple(float(x) for x in tp),
         ),
-        PostflopPrior(
-            theta_post=tuple(float(x) for x in ts),
-            floor=postflop_floor,
-            beta_facing=beta_facing,
-            beta_no_bet=beta_no_bet,
+        PostflopActionModel(
+            PostflopPrior(
+                floor=postflop_floor,
+                beta_facing=beta_facing,
+                beta_no_bet=beta_no_bet,
+            ),
+            tuple(float(x) for x in ts),
         ),
     )

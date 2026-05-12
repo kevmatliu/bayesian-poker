@@ -1,4 +1,4 @@
-"""Dataclasses and small config types shared by runner entrypoints."""
+"""Dataclasses and small config types shared by ``runners`` CLIs and ``priors_artifacts``."""
 
 from __future__ import annotations
 

@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from utils.prior.common import softmax_vec
+from utils.action.common import softmax_vec
 
 
 def train_multinomial_3_class(

@@ -7,10 +7,10 @@ import unittest
 from itertools import combinations
 
 from utils.filter import ComboRangeFilter, all_combo_keys, combo_key, parse_combo_key
-from utils.filter.helpers import initial_class_prior
+from utils.filter.common import initial_class_prior
 from utils.filter.postflop import _coerce_cards
-from utils.prior.postflop import CALL, FOLD, PostflopFeatures, PostflopPrior, RAISE
-from utils.strength.common import all_52_cards, parse_card
+from utils.action.postflop import CALL, FOLD, PostflopFeatures, PostflopPrior, RAISE
+from utils.parse import all_52_cards, parse_card
 from utils.strength.preflop import all_169_classes
 
 

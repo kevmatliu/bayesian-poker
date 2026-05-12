@@ -1,4 +1,4 @@
-"""Batch filtering over session folders (``runner.py filter-sessions``)."""
+"""Batch filtering over session folders (``python -m runners.filter_sessions``)."""
 
 from __future__ import annotations
 
@@ -13,10 +13,11 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from pipeline_common import load_json, read_session_names_file
 from priors_artifacts import preflop_postflop_priors_for_target
-from runner_execute import LOG, _run_preflop_filter_for_hand, all_combo_keys
 from utils.filter import ComboRangeFilter
 from utils.parse import Session
 from utils.postflop_runner_bridge import POSTFLOP_STREETS
+
+from .execute import LOG, _run_preflop_filter_for_hand, all_combo_keys
 
 
 def _board_at_street_end(hand, street: str) -> str:
@@ -36,7 +37,7 @@ def _range_history_rows_for_hand(
     street_snaps: List[Tuple[str, Dict[str, float]]],
     combo_cols: Sequence[str],
 ) -> List[Dict[str, Any]]:
-    """Same row layout as ``runner_session_split._range_history_rows_for_hand`` / ``online_range_history.csv``."""
+    """Same row layout as ``online_range_history.csv`` (combo-range history schema)."""
     observer_hole = hand.hole_cards.get(observer, "") or ""
     rows: List[Dict[str, Any]] = []
 
@@ -101,8 +102,7 @@ def filter_sessions_main(argv: Optional[List[str]] = None) -> int:
     parser = argparse.ArgumentParser(
         description=(
             "For each session in a list file, run preflop range + postflop combo filtering using "
-            "population beta from global_priors.json and per-target theta from player_thetas.json "
-            "(same prior construction as the online phase of ``runner.py session-split``)."
+            "population beta from global_priors.json and per-target theta from player_thetas.json."
         ),
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
@@ -137,8 +137,7 @@ def filter_sessions_main(argv: Optional[List[str]] = None) -> int:
         help=(
             "Roster of distinct player names (2–6). For two players, a hand is used only when both "
             "are seated. For more than two, each unordered roster pair (n choose 2) is run in both "
-            "directions whenever both players in that pair are seated (same observer×target grid as "
-            "``runner.py session-split`` online phase, generalized beyond two fixed seats)."
+            "directions whenever both players in that pair are seated."
         ),
     )
     parser.add_argument("--top-k", type=int, default=10)
@@ -147,7 +146,7 @@ def filter_sessions_main(argv: Optional[List[str]] = None) -> int:
         "--filter-verbose",
         action="store_true",
         dest="filter_verbose",
-        help="Per-update INFO logs during filtering (default: on; matches session-split online).",
+        help="Per-update INFO logs during filtering (default: on).",
     )
     parser.add_argument(
         "--no-filter-verbose",
@@ -160,8 +159,8 @@ def filter_sessions_main(argv: Optional[List[str]] = None) -> int:
         type=Path,
         default=Path("artifacts/filter_sessions_range_history.csv"),
         help=(
-            "Write combo-range history in the same schema as ``runner.py session-split`` "
-            "``--range-csv-out`` (``online_range_history.csv``): metadata + 1326 combo columns per row."
+            "Write combo-range history CSV (metadata + 1326 combo columns per row); "
+            "same column layout as ``online_range_history.csv``."
         ),
     )
     parser.add_argument(
@@ -294,8 +293,8 @@ def filter_sessions_main(argv: Optional[List[str]] = None) -> int:
                     hand_index=hi,
                     phi=0.0,
                     top_k=args.top_k,
-                    learned_prior=learned_pre,
-                    learned_postflop_prior=learned_post,
+                    learned_preflop_model=learned_pre,
+                    learned_postflop_model=learned_post,
                     street_end_snapshots=street_snaps,
                     filter_verbose=args.filter_verbose,
                     filter_tag=tag,
@@ -378,3 +377,7 @@ def filter_sessions_main(argv: Optional[List[str]] = None) -> int:
         LOG.info("Wrote %s", out)
 
     return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(filter_sessions_main())

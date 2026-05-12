@@ -20,8 +20,10 @@ from pipeline_common import (
     preflop_decisions_for_hand,
 )
 from utils.postflop_runner_bridge import collect_postflop_observations_known_hole_cards
+from utils.action.postflop import PostflopActionModel
+from utils.action.preflop import PreflopActionModel, canonical_preflop_action
 from utils.prior.postflop import PostflopPrior
-from utils.prior.preflop import PreflopPrior, canonical_preflop_action
+from utils.prior.preflop import PreflopPrior
 
 LOG = logging.getLogger("eval")
 
@@ -40,13 +42,13 @@ def build_parser() -> argparse.ArgumentParser:
         "--global-priors",
         type=Path,
         required=True,
-        help="JSON from train.py.",
+        help="JSON from ``python -m runners.train`` (global priors).",
     )
     p.add_argument(
         "--player-thetas",
         type=Path,
         default=None,
-        help="Optional JSON from find_theta.py (uses zeros when omitted).",
+        help="Optional JSON from ``python -m runners.find_theta`` (uses zeros when omitted).",
     )
     p.add_argument(
         "--players",
@@ -147,17 +149,18 @@ def evaluate_split(
             if allowed is not None and player not in allowed:
                 continue
             tp, ts = thetas_map.get(player, ([0.0, 0.0, 0.0], [0.0, 0.0, 0.0]))
-            pre_prior = PreflopPrior(
-                theta_pre=tuple(tp),
-                floor=preflop_floor,
-                beta_preflop=beta_preflop,
+            pre_prior = PreflopActionModel(
+                PreflopPrior(floor=preflop_floor, beta_preflop=beta_preflop),
+                tuple(float(x) for x in tp),
             )
 
-            post_prior = PostflopPrior(
-                theta_post=tuple(ts),
-                floor=postflop_floor,
-                beta_facing=beta_facing,
-                beta_no_bet=beta_no_bet,
+            post_prior = PostflopActionModel(
+                PostflopPrior(
+                    floor=postflop_floor,
+                    beta_facing=beta_facing,
+                    beta_no_bet=beta_no_bet,
+                ),
+                tuple(float(x) for x in ts),
             )
 
             hc = hole_cards_to_hand_class(hand.hole_cards.get(player, "") or "")

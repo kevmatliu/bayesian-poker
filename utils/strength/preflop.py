@@ -5,7 +5,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import List
 
-from utils.strength.common import Card, RANK_TO_VALUE, StrengthMode, VALUE_TO_RANK
+from utils.parse import Card, RANK_TO_VALUE, VALUE_TO_RANK
+from utils.strength.common import StrengthMode
 
 MODE = StrengthMode.PREFLOP
 

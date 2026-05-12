@@ -38,28 +38,28 @@ for path in (str(REPO_ROOT), str(REPO_ROOT / "utils")):
         sys.path.insert(0, path)
 
 from utils.em import PostflopEMHandBundle, PreflopEMDecision, PreflopEMHandBundle
-from utils.filter.helpers import initial_class_prior, normalize
+from utils.filter.common import initial_class_prior, normalize
 from utils.parse import Hand
 from utils.postflop_runner_bridge import (
     collect_postflop_em_bundle_for_hand,
     collect_postflop_observations_known_hole_cards,
     postflop_target_decisions_for_hand,
 )
-from utils.prior.postflop import (
+from utils.action.postflop import (
     FOLD,
     PHI_DIM,
     feature_vector,
     train_baseline_facing_bet,
     train_baseline_no_bet,
 )
-from utils.prior.preflop import (
+from utils.action.preflop import (
     PREFLOP_PHI_DIM,
     canonical_preflop_action,
     preflop_feature_vector,
     state_key_from_parse_state,
     train_baseline_preflop,
 )
-from utils.strength.common import parse_card
+from utils.parse import parse_card
 from utils.strength.preflop import get_equivalence_class
 
 
@@ -91,10 +91,10 @@ def postflop_phi_column_labels() -> List[str]:
     """Names for each entry of the length-``PHI_DIM`` postflop feature vector.
 
     Tracks the base + rich + equity blocks defined in
-    :mod:`utils.prior.postflop`. Bumped from 13 to 30 alongside Method A
+    :mod:`utils.action.postflop`. Bumped from 13 to 30 alongside Method A
     (rich per-combo categorical features) and Method E (rollout equity).
     """
-    from utils.prior.postflop import phi_column_labels as _labels
+    from utils.action.postflop import phi_column_labels as _labels
 
     return list(_labels())
 
@@ -103,7 +103,7 @@ def _verify_phi_dims() -> None:
     """Assert label tables match compiled feature dimensions (fails fast on drift)."""
     if len(preflop_phi_column_labels()) != PREFLOP_PHI_DIM:
         raise RuntimeError("preflop_phi_column_labels length mismatch vs PREFLOP_PHI_DIM")
-    from utils.prior.postflop import PHI_DIM
+    from utils.action.postflop import PHI_DIM
 
     if len(postflop_phi_column_labels()) != PHI_DIM:
         raise RuntimeError("postflop_phi_column_labels length mismatch vs PHI_DIM")
@@ -436,7 +436,7 @@ def collect_preflop_supervised_rows(refs: Sequence[HandRef]) -> Tuple[np.ndarray
     """Build ``(X, y)`` for population preflop baseline training.
 
     One row per ``(hand, player, preflop_decision)`` where that player's hole
-    cards map to a 169 class. ``X`` rows are :func:`utils.prior.preflop.preflop_feature_vector`
+    cards map to a 169 class. ``X`` rows are :func:`utils.action.preflop.preflop_feature_vector`
     and ``y`` entries are canonical actions ``{FOLD, CHECK_CALL, RAISE}``.
     """
     xs: List[np.ndarray] = []

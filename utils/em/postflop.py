@@ -1,4 +1,10 @@
-"""Postflop EM over combo keys and theta_post."""
+"""Postflop EM: posterior over hole-card combos and ``theta_post``.
+
+E-step: :func:`e_step_postflop_bundle` updates ``q(c)`` with batched
+:meth:`~utils.action.postflop.PostflopActionModel.action_probs_matrix` per street.
+M-step: :func:`m_step_theta_post_gradient_ascent_bundles` does tilt-parameter ascent
+with optional hand-level minibatches (same scaling contract as preflop).
+"""
 
 from __future__ import annotations
 
@@ -13,16 +19,24 @@ import numpy as np
 from utils.em.common import (
     M_STEP_GRAD_NORM_TOL,
     POSTFLOP_M_BATCH_SIZE,
+    effective_sample_size,
+    max_effective_sample_size,
+    minibatch_plan,
     normalize_log_weights,
 )
-from utils.prior.postflop import PostflopFeatures, PostflopPrior
+from utils.action.postflop import (
+    PostflopActionModel,
+    PostflopFeatures,
+    feature_vector,
+)
+from utils.prior.postflop import PostflopPrior
 
 LOG = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
 class PostflopThetaObservation:
-    """Legacy: one candidate combo with log-prior hint + decision sequence (e.g. supervised rows)."""
+    """One candidate combo with log-prior hint + decision sequence (e.g. supervised rows)."""
 
     combo_key: str
     log_prior_range: float
@@ -47,7 +61,7 @@ class PostflopEMHandBundle:
 
 def e_step_combo_posterior(
     observations: Sequence[PostflopThetaObservation],
-    prior: PostflopPrior,
+    prior: PostflopActionModel,
 ) -> Dict[str, float]:
     """q(c) ∝ exp(log pi(c) + sum_t log P_theta(a_t | x_t(c)))."""
     log_w: Dict[str, float] = {}
@@ -62,16 +76,14 @@ def e_step_combo_posterior(
 
 def e_step_postflop_bundle(
     bundle: PostflopEMHandBundle,
-    prior: PostflopPrior,
+    prior: PostflopActionModel,
 ) -> Dict[str, float]:
     """``q(c) ∝ pi_0(c) * prod_t P_theta(a_t | x_t(c))``.
 
-    Batched across combos using :meth:`PostflopPrior.action_probs_matrix`
+    Batched across combos using :meth:`PostflopActionModel.action_probs_matrix`
     (Method D): for each timestep we evaluate every combo's likelihood in
     one matmul instead of one Python softmax per combo.
     """
-    from utils.prior.postflop import feature_vector
-
     initial = bundle.initial_combo_range
     log_q: Dict[str, float] = {
         combo: math.log(p0) for combo, p0 in initial.items() if p0 > 0.0
@@ -109,7 +121,7 @@ def e_step_postflop_bundle(
 
 
 def postflop_theta_gradient(
-    prior_template: PostflopPrior,
+    prior_template: PostflopActionModel,
     hands: Sequence[Sequence[PostflopThetaObservation]],
     q_by_hand: Sequence[Mapping[str, float]],
     *,
@@ -137,7 +149,7 @@ def postflop_theta_gradient(
 
 
 def postflop_theta_gradient_bundles(
-    prior_template: PostflopPrior,
+    prior_template: PostflopActionModel,
     bundles: Sequence[PostflopEMHandBundle],
     q_by_hand: Sequence[Mapping[str, float]],
     *,
@@ -149,7 +161,7 @@ def postflop_theta_gradient_bundles(
 
     For each timestep we materialise the live combos as a single
     ``(N, PHI_DIM)`` feature matrix and call
-    :meth:`PostflopPrior.action_probs_matrix` once. The gradient
+    :meth:`PostflopActionModel.action_probs_matrix` once. The gradient
     contribution simplifies to ``w * (e_action - p_theta)`` after
     cancelling the ``-E_p[u]`` drift term across actions, so we can
     accumulate it with a single weighted sum per row (Method D).
@@ -158,8 +170,6 @@ def postflop_theta_gradient_bundles(
     (for minibatch M-step); use ``apply_l2=False`` and apply L2 outside when
     scaling stochastic gradients.
     """
-    from utils.prior.postflop import feature_vector
-
     grad = np.zeros(3, dtype=float)
     theta_vec = prior_template.theta_vec
     eye = np.eye(3, dtype=float)
@@ -206,7 +216,7 @@ def postflop_theta_gradient_bundles(
 
 
 def m_step_theta_post_gradient_ascent(
-    prior_template: PostflopPrior,
+    beta_source: PostflopPrior,
     hands: Sequence[Sequence[PostflopThetaObservation]],
     q_by_hand: Sequence[Mapping[str, float]],
     *,
@@ -222,11 +232,9 @@ def m_step_theta_post_gradient_ascent(
     used = steps
 
     for step_i in range(steps):
-        live = PostflopPrior(
-            theta_post=tuple(float(x) for x in theta),
-            floor=prior_template.floor,
-            beta_facing=prior_template.beta_facing_matrix,
-            beta_no_bet=prior_template.beta_no_bet_matrix,
+        live = PostflopActionModel(
+            beta_source,
+            tuple(float(x) for x in theta),
         )
         g = postflop_theta_gradient(live, hands, q_by_hand, l2=l2)
         gn = float(np.linalg.norm(g))
@@ -249,7 +257,7 @@ def m_step_theta_post_gradient_ascent(
 
 
 def m_step_theta_post_gradient_ascent_bundles(
-    prior_template: PostflopPrior,
+    beta_source: PostflopPrior,
     bundles: Sequence[PostflopEMHandBundle],
     q_by_hand: Sequence[Mapping[str, float]],
     *,
@@ -272,24 +280,15 @@ def m_step_theta_post_gradient_ascent_bundles(
 
     n_hands = len(bundles)
     rng = np.random.default_rng(m_step_seed)
-    if m_batch_size <= 0 or m_batch_size >= n_hands:
-        bundle_batch_cap = n_hands
-        use_minibatch = False
-    else:
-        bundle_batch_cap = int(m_batch_size)
-        use_minibatch = True
+    use_minibatch = m_batch_size > 0 and m_batch_size < n_hands
 
     for step_i in range(steps):
-        live = PostflopPrior(
-            theta_post=tuple(float(x) for x in theta),
-            floor=prior_template.floor,
-            beta_facing=prior_template.beta_facing_matrix,
-            beta_no_bet=prior_template.beta_no_bet_matrix,
+        live = PostflopActionModel(
+            beta_source,
+            tuple(float(x) for x in theta),
         )
         if use_minibatch:
-            bsz = min(bundle_batch_cap, n_hands)
-            batch_ix = rng.choice(n_hands, size=bsz, replace=False)
-            scale = n_hands / float(bsz)
+            batch_ix, scale, _ = minibatch_plan(n_hands, m_batch_size, rng)
             g_data = postflop_theta_gradient_bundles(
                 live,
                 bundles,
@@ -407,11 +406,14 @@ def run_postflop_theta_em(
                 }
             )
 
-        prior = PostflopPrior(
-            theta_post=tuple(float(x) for x in theta),
+        base_prior = PostflopPrior(
             floor=prior_floor,
             beta_facing=beta_facing,
             beta_no_bet=beta_no_bet,
+        )
+        prior = PostflopActionModel(
+            base_prior,
+            tuple(float(x) for x in theta),
         )
 
         last_per_hand = []
@@ -435,7 +437,7 @@ def run_postflop_theta_em(
                 if hand_meta is not None and hi < len(hand_meta):
                     meta = dict(hand_meta[hi])
                 qv = list(q.values())
-                ess = (sum(qv) ** 2) / sum(v * v for v in qv) if qv else 0.0
+                ess = effective_sample_size(qv)
                 history_hook(
                     {
                         "kind": "postflop_e_step",
@@ -459,12 +461,7 @@ def run_postflop_theta_em(
                     time.perf_counter() - t_e0,
                 )
 
-        max_ess = 0.0
-        if last_per_hand:
-            for qm in last_per_hand:
-                qv = list(qm.values())
-                if qv:
-                    max_ess = max(max_ess, (sum(qv) ** 2) / sum(v * v for v in qv))
+        max_ess = max_effective_sample_size(last_per_hand) if last_per_hand else 0.0
         LOG.info(
             "Postflop EM E-step done | outer %d/%d | wall_s=%.2f | max_ess≈%.2f",
             outer + 1,
@@ -484,12 +481,6 @@ def run_postflop_theta_em(
                     "theta_post": [float(x) for x in theta],
                 }
             )
-
-        base_prior = PostflopPrior(
-            floor=prior_floor,
-            beta_facing=beta_facing,
-            beta_no_bet=beta_no_bet,
-        )
 
         nh_m = len(bundles_list)
         mb_eff = (
@@ -569,5 +560,5 @@ def single_hand_em_gradient_sample(
         return np.zeros(3, dtype=float)
     w = 1.0 / n
     qmaps = [{obs.combo_key: w for obs in observations}]
-    prior = PostflopPrior(floor=prior_floor)
-    return postflop_theta_gradient(prior, hands, qmaps, l2=0.0)
+    model = PostflopActionModel(PostflopPrior(floor=prior_floor), (0.0, 0.0, 0.0))
+    return postflop_theta_gradient(model, hands, qmaps, l2=0.0)
