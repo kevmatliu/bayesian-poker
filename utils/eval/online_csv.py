@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Iterable, Optional, Tuple
+from typing import Iterable, List, Optional, Tuple
 
 import numpy as np
 
@@ -11,14 +11,23 @@ import pandas as pd
 
 from utils.eval.brier import brier_postflop1326, brier_preflop_from_combo1326
 from utils.eval.logutil import eval_log
-from utils.eval.strength import actual_made_and_draw, expected_made_and_draw_mc
+from utils.eval.strength import (
+    expected_made_and_draw_mc,
+    made_percentile_calibration_stats,
+    made_percentile_vector_1326,
+)
 from utils.eval.table import board_at_street_end, seat_columns
 from utils.filter import all_combo_keys, combo_key
 from utils.parse import Hand
-from utils.strength.common import parse_card
+from utils.strength.common import parse_card, parse_cards
+from utils.strength.postflop import draw_strength_from_hand
 from utils.strength.preflop import get_equivalence_class
 
 META_COLUMNS: Tuple[str, ...] = ("session", "hand_number", "street", "observer", "target")
+
+# Prefix for per-combo made-strength percentile columns in :func:`add_calibration_columns`.
+# (Distinct from raw combo-key probability column names, which are exactly ``combo_key`` strings.)
+MADE_STRENGTH_PCT_COLUMN_PREFIX = "made_strength_pct__"
 
 
 def meta_columns_present(df: pd.DataFrame) -> None:
@@ -28,9 +37,18 @@ def meta_columns_present(df: pd.DataFrame) -> None:
 
 
 def combo_probability_columns(df: pd.DataFrame) -> list[str]:
-    """All columns aside from fixed metadata (assumes no extra columns yet)."""
-    meta = set(META_COLUMNS)
-    return [c for c in df.columns if c not in meta]
+    """Canonical 1,326 combo **probability** columns present in ``df`` (``all_combo_keys()`` order)."""
+    keys = list(all_combo_keys())
+    return [c for c in keys if c in df.columns]
+
+
+def combo_made_percentile_column_names(
+    combo_order: Optional[Iterable[str]] = None,
+) -> List[str]:
+    """Column names for per-combo made percentiles (see :func:`add_calibration_columns`)."""
+    keys = list(combo_order) if combo_order is not None else list(all_combo_keys())
+    pfx = MADE_STRENGTH_PCT_COLUMN_PREFIX
+    return [f"{pfx}{k}" for k in keys]
 
 
 def load_hand_pluribus(
@@ -129,6 +147,20 @@ def _true_combo_key(hole4: str) -> str:
     return combo_key(parse_card(hole4[0:2]), parse_card(hole4[2:4]))
 
 
+def _board_cards_list(board_str: str) -> list:
+    s = (board_str or "").strip()
+    if len(s) < 6:
+        return []
+    return parse_cards([s[i : i + 2] for i in range(0, len(s), 2)])
+
+
+def _hole_cards_list(hole4: str) -> list:
+    h = (hole4 or "").strip()
+    if len(h) != 4:
+        return []
+    return parse_cards([h[0:2], h[2:4]])
+
+
 def add_calibration_columns(
     df: pd.DataFrame,
     combo_cols: Iterable[str],
@@ -139,14 +171,20 @@ def add_calibration_columns(
     progress_every: int = 50,
 ) -> pd.DataFrame:
     """
-    Append ``brier``, ``expected_made_pct``, ``expected_draw``, ``actual_made_pct``, ``actual_draw``.
+    Append calibration columns including Brier, strength summaries, and made-percentile
+    scores under the row's combo distribution.
 
-    Preflop rows: Brier via 1,326 → 169 collapse. Postflop: full 1,326 Brier.
+    ``actual_made_pct`` uses :func:`made_percentile_vector_1326` (cached fast path) and the
+    static 1,326 row order, not a per-call legacy percentile loop.
 
-    Expected strength uses :func:`expected_made_and_draw_mc` (see ``strength_mc_samples``).
+    Also appends **1,326** columns ``made_strength_pct__<combo_key>`` — the exact made
+    strength percentile for every combo in the static table on the row's board (NaN
+    preflop or when the board is too short). Together with the probability columns this
+    yields **≥ 2,652** combo-related columns plus metadata and other calibration fields.
 
-    With ``verbose=True``, prints progress every ``progress_every`` rows. Per-row strength/Brier
-    internals stay quiet unless you call those functions directly with ``verbose=True``.
+    Postflop-only extras: ``made_dist_mu``, ``made_dist_sigma``, ``made_pct_z``,
+    ``made_pct_abs_z``, ``combo_nll``, ``made_pct_midrank``, ``made_pct_cdf_le`` (see
+    :func:`made_percentile_calibration_stats`).
     """
     meta_columns_present(df)
     n = len(df)
@@ -168,7 +206,18 @@ def add_calibration_columns(
     edraw = []
     amade = []
     adraw = []
-    for ri, (_, row) in enumerate(out.iterrows(), start=1):
+    made_mu = []
+    made_sig = []
+    made_z = []
+    made_abs_z = []
+    combo_nll = []
+    made_midrank = []
+    made_cdf_le = []
+    combo_to_ix = {k: i for i, k in enumerate(order)}
+    made_per_combo = np.full((n, 1326), np.nan, dtype=np.float64)
+    perc_by_board: dict[str, np.ndarray] = {}
+    for i, (_, row) in enumerate(out.iterrows()):
+        ri = i + 1
         if verbose and (ri == 1 or ri == n or ri % step == 0):
             eval_log(verbose, f"calibration … row {ri}/{n}")
         dist = {c: float(row[c]) for c in order}
@@ -197,9 +246,52 @@ def add_calibration_columns(
                 rng=strength_rng,
                 verbose=False,
             )
-            a1, a2 = actual_made_and_draw(hole, board, verbose=False)
+            hole_cards = _hole_cards_list(hole)
+            b_cards = _board_cards_list(board)
+            if len(hole_cards) == 2 and len(b_cards) >= 3:
+                a2 = float(draw_strength_from_hand(hole_cards, b_cards))
+            else:
+                a2 = float("nan")
+
+            if board not in perc_by_board:
+                perc_by_board[board] = made_percentile_vector_1326(board)
+            perc_v = perc_by_board[board]
+            made_per_combo[i, :] = perc_v
+            p_v = np.array([float(row[c]) for c in order], dtype=np.float64)
+            tc = _true_combo_key(hole) if len(hole) == 4 else ""
+            j = combo_to_ix.get(tc, -1) if tc else -1
+            if j >= 0 and np.isfinite(perc_v[j]):
+                a1 = float(perc_v[j])
+                mu, sig, z, az, nll, mid, cle = made_percentile_calibration_stats(
+                    p_v, perc_v, j
+                )
+                made_mu.append(mu)
+                made_sig.append(sig)
+                made_z.append(z)
+                made_abs_z.append(az)
+                combo_nll.append(nll if np.isfinite(nll) else float("nan"))
+                made_midrank.append(mid)
+                made_cdf_le.append(cle)
+            else:
+                a1 = float("nan")
+                nan_m = float("nan")
+                made_mu.append(nan_m)
+                made_sig.append(nan_m)
+                made_z.append(nan_m)
+                made_abs_z.append(nan_m)
+                combo_nll.append(nan_m)
+                made_midrank.append(nan_m)
+                made_cdf_le.append(nan_m)
         else:
             e1 = e2 = a1 = a2 = float("nan")
+            made_mu.append(float("nan"))
+            made_sig.append(float("nan"))
+            made_z.append(float("nan"))
+            made_abs_z.append(float("nan"))
+            combo_nll.append(float("nan"))
+            made_midrank.append(float("nan"))
+            made_cdf_le.append(float("nan"))
+
         emade.append(e1)
         edraw.append(e2)
         amade.append(a1)
@@ -210,5 +302,17 @@ def add_calibration_columns(
     out["expected_draw"] = edraw
     out["actual_made_pct"] = amade
     out["actual_draw"] = adraw
+    out["made_dist_mu"] = made_mu
+    out["made_dist_sigma"] = made_sig
+    out["made_pct_z"] = made_z
+    out["made_pct_abs_z"] = made_abs_z
+    out["combo_nll"] = combo_nll
+    out["made_pct_midrank"] = made_midrank
+    out["made_pct_cdf_le"] = made_cdf_le
+    perc_cols = combo_made_percentile_column_names(order)
+    out = pd.concat(
+        [out, pd.DataFrame(made_per_combo, columns=perc_cols, index=out.index)],
+        axis=1,
+    )
     eval_log(verbose, "add_calibration_columns: done")
     return out
