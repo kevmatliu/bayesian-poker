@@ -2,6 +2,8 @@
 .venv/
 .pytest_cache/
 
+.DS_Store
+
 artifacts/filter_sessions_process.log
 artifacts/filter_sessions_range_history_enriched.csv
 artifacts/filter_sessions_range_history_newton.csv
