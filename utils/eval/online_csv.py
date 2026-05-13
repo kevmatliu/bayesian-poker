@@ -36,6 +36,9 @@ META_COLUMNS: Tuple[str, ...] = ("session", "hand_number", "street", "observer",
 # (Distinct from raw combo-key probability column names, which are exactly ``combo_key`` strings.)
 MADE_STRENGTH_PCT_COLUMN_PREFIX = "made_strength_pct__"  # namespace wide percentile columns away from probs
 
+# Prior street for postflop labels (require target was still in before this street).
+_STREET_PRIOR_FOR_LABEL: dict[str, str] = {"flop": "pre-flop", "turn": "flop", "river": "turn"}
+
 
 def meta_columns_present(df: pd.DataFrame) -> None:
     missing = [c for c in META_COLUMNS if c not in df.columns]            # detect absent required fields
@@ -88,8 +91,14 @@ def enrich_online_range_dataframe(
     ``betting_this_street`` (action on the row's street, from the final in-street snapshot),
     both human-readable strings for plotting / notebooks.
 
-    Adds ``target_still_in_hand`` — whether ``target`` is still in the pot at the end of
-    the row's ``street`` (``False`` when the ``.phh`` is missing or the street was not reached).
+    Adds ``target_still_in_hand`` — whether ``target`` may be scored on this row:
+
+    * ``pre-flop``: alive at the end of pre-flop (survived the preflop betting round).
+    * ``flop`` / ``turn`` / ``river``: alive at the **end of the prior street** (entered this
+      street still contesting) **and** alive at the **end of this street**. This drops carry-forward
+      CSV rows where the board advanced but ``target`` had already folded.
+
+    ``False`` when the ``.phh`` is missing or the relevant street was not reached.
 
     With ``verbose=True``, prints progress every ``progress_every`` rows (minimum 1).
     """
@@ -120,7 +129,17 @@ def enrich_online_range_dataframe(
     seats: list[list[str]] = []                                                                  # parallel column buffer: six seat holes
     bet_prior: list[str] = []                                                                    # parallel column buffer: prior betting text
     bet_this: list[str] = []                                                                     # parallel column buffer: in-street betting text
-    still_in: list[bool] = []                                                                    # target alive at end of row street (for eval filtering)
+    still_in: list[bool] = []                                                                    # target eligible for row metrics (for eval filtering)
+
+    def _target_still_in_for_row(h: Hand, street_label: str, target_name: str) -> bool:
+        if street_label == "pre-flop":
+            return player_alive_at_street_end(h, "pre-flop", target_name)
+        prior = _STREET_PRIOR_FOR_LABEL.get(street_label)
+        if prior is None:
+            return player_alive_at_street_end(h, street_label, target_name)
+        return player_alive_at_street_end(h, prior, target_name) and player_alive_at_street_end(
+            h, street_label, target_name
+        )
 
     for i, (_, row) in enumerate(out.iterrows(), start=1):                                       # iterate rows with 1-based human index
         if verbose and (i == 1 or i == n or i % step == 0):                                      # periodic progress
@@ -145,7 +164,7 @@ def enrich_online_range_dataframe(
         seats.append([sc.get(f"p{i}", "") for i in range(1, 7)])                                 # fixed p1..p6 order
         bet_prior.append(betting_history_up_to_street_end(hand, st))                             # completed prior action narrative
         bet_this.append(betting_history_on_street(hand, st))                                     # in-street action narrative
-        still_in.append(player_alive_at_street_end(hand, st, tgt))                               # fold filtering for range metrics
+        still_in.append(_target_still_in_for_row(hand, st, tgt))                                 # fold filtering for range metrics
 
     out["community_cards"] = comm                                                                # attach new column
     out["target_hole_cards"] = holes                                                             # attach new column

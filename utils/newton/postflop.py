@@ -18,6 +18,7 @@ from utils.em.postflop import (
 from utils.newton.common import (
     NEWTON_HESSIAN_FD_EPS,
     NEWTON_HESSIAN_SHIFT_RIDGE,
+    NEWTON_OUTER_ITERS_CAP,
     backtracking_line_search,
     hessian_from_gradient_fd,
     log_sum_exp_mapping,
@@ -31,7 +32,7 @@ LOG = logging.getLogger(__name__)
 def _hand_progress_stride(n_hands: int) -> int:
     if n_hands <= 0:
         return 1
-    return max(1, n_hands // 25)
+    return max(1, n_hands // 25)  # ~25 progress log lines per full E-step pass
 
 
 def _e_step_postflop_all_with_progress(
@@ -48,8 +49,8 @@ def _e_step_postflop_all_with_progress(
     t0 = time.perf_counter()
     out: List[Dict[str, float]] = []
     for hi, b in enumerate(bundles):
-        out.append(e_step_postflop_bundle(b, prior))
-        if hi == 0 or hi == n - 1 or (hi + 1) % stride == 0:
+        out.append(e_step_postflop_bundle(b, prior))                              # posterior q(c) for one bundle
+        if hi == 0 or hi == n - 1 or (hi + 1) % stride == 0:                      # first / last / periodic heartbeat
             log.info(
                 "%s | E-step hand %d/%d | elapsed_s=%.2f",
                 label,
@@ -66,32 +67,32 @@ def _postflop_bundle_log_marginal_evidence(bundle: PostflopEMHandBundle, prior: 
     initial = bundle.initial_combo_range
     log_q: Dict[str, float] = {
         combo: math.log(p0) for combo, p0 in initial.items() if p0 > 0.0
-    }
+    }                                                                             # log π0(c) on positive-mass combos
     if not log_q:
         return float("-inf")
-    alive = set(log_q.keys())
+    alive = set(log_q.keys())                                                     # combos still on a live path in the tree
 
     for step in bundle.decisions:
         feat_map = dict(step.features_by_combo)
-        live = [c for c in alive if c in feat_map]
+        live = [c for c in alive if c in feat_map]                                # combos that reach this decision node
         if not live:
             return float("-inf")
-        phi = np.stack([feature_vector(feat_map[c]) for c in live], axis=0)
+        phi = np.stack([feature_vector(feat_map[c]) for c in live], axis=0)       # design rows for live combos
         facing = np.fromiter(
             (feat_map[c].facing_bet for c in live),
             dtype=bool,
             count=len(live),
         )
-        log_probs = prior.action_log_probs_matrix(phi, facing)
-        log_pa = log_probs[:, int(step.action)]
+        log_probs = prior.action_log_probs_matrix(phi, facing)                    # log P(all actions | φ) per combo row
+        log_pa = log_probs[:, int(step.action)]                                   # observed action column only
         for combo, lp in zip(live, log_pa):
-            log_q[combo] += float(lp)
-        alive = set(live)
+            log_q[combo] += float(lp)                                             # path log-likelihood along the spine
+        alive = set(live)                                                         # restrict support to surviving combos
 
-    log_q = {c: v for c, v in log_q.items() if c in alive}
+    log_q = {c: v for c, v in log_q.items() if c in alive}                        # discard mass on pruned branches
     if not log_q:
         return float("-inf")
-    return log_sum_exp_mapping(log_q)
+    return log_sum_exp_mapping(log_q)                                             # log ∑_c exp log q(c)
 
 
 def postflop_map_objective(
@@ -107,7 +108,7 @@ def postflop_map_objective(
     prior = PostflopActionModel(
         beta_source,
         tuple(float(x) for x in theta_vec),
-    )
+    )                                                                   # softmax policy with current θ
     n = len(bundles)
     ell = 0.0
     t0 = time.perf_counter()
@@ -115,7 +116,7 @@ def postflop_map_objective(
         stride = _hand_progress_stride(n)
         log.info("%s | MAP objective | marginal log-evidence over %d hand-bundles…", log_label, n)
         for hi, b in enumerate(bundles):
-            ell += _postflop_bundle_log_marginal_evidence(b, prior)
+            ell += _postflop_bundle_log_marginal_evidence(b, prior)     # add marginal log-evidence for this bundle
             if hi == 0 or hi == n - 1 or (hi + 1) % stride == 0:
                 log.info(
                     "%s | MAP objective | hand %d/%d | partial_ell=%.4f | elapsed_s=%.2f",
@@ -134,8 +135,8 @@ def postflop_map_objective(
         )
     else:
         for b in bundles:
-            ell += _postflop_bundle_log_marginal_evidence(b, prior)
-    return ell - 0.5 * float(l2) * float(np.dot(theta_vec, theta_vec))
+            ell += _postflop_bundle_log_marginal_evidence(b, prior)     # same sum without progress logging
+    return ell - 0.5 * float(l2) * float(np.dot(theta_vec, theta_vec))  # MAP objective = data ell - L2 term
 
 
 def postflop_map_gradient(
@@ -151,16 +152,16 @@ def postflop_map_gradient(
     live = PostflopActionModel(
         beta_source,
         tuple(float(x) for x in theta_vec),
-    )
+    )                                                                        # policy at θ for E-step posteriors
     n = len(bundles)
     if log is not None and n > 0:
         log.info("%s | MAP gradient | E-step over %d hand-bundles…", log_label, n)
         q_by_hand = _e_step_postflop_all_with_progress(bundles, live, log=log, label=log_label)
         log.info("%s | MAP gradient | batched tilt-score accumulation…", log_label)
     else:
-        q_by_hand = [e_step_postflop_bundle(b, live) for b in bundles]
+        q_by_hand = [e_step_postflop_bundle(b, live) for b in bundles]       # cheap list comp when logging disabled
     t_acc = time.perf_counter()
-    grad = postflop_theta_gradient_bundles(live, bundles, q_by_hand, l2=l2)
+    grad = postflop_theta_gradient_bundles(live, bundles, q_by_hand, l2=l2)  # tilt score matches marginal grad
     if log is not None:
         log.info(
             "%s | MAP gradient | done | |grad|=%.5f | tilt_accum_s=%.2f",
@@ -178,7 +179,7 @@ def run_postflop_theta_newton(
     theta_init: Sequence[float] | None = None,
     beta_facing: np.ndarray | None = None,
     beta_no_bet: np.ndarray | None = None,
-    max_newton_iters: int = 15,
+    max_newton_iters: int = 3,
     m_l2: float = 0.25,
     clip: float = 3.0,
     center_each_step: bool = True,
@@ -187,19 +188,26 @@ def run_postflop_theta_newton(
     grad_norm_tol: float = 0.1,
     history_hook: Optional[Callable[[Dict[str, Any]], None]] = None,
     hand_meta: Optional[Sequence[Mapping[str, Any]]] = None,
+    diagnostics: Optional[Dict[str, Any]] = None,
 ) -> Tuple[np.ndarray, List[Dict[str, float]]]:
-    """MAP Newton on marginal postflop log-likelihood; mirrors :func:`utils.em.postflop.run_postflop_theta_em`."""
+    """MAP Newton on marginal postflop log-likelihood; mirrors :func:`utils.em.postflop.run_postflop_theta_em`.
+
+    Outer iterations are capped at :data:`utils.newton.common.NEWTON_OUTER_ITERS_CAP`.
+    If ``diagnostics`` is set, it receives ``outer_steps`` (MAP / NLL / gradient norms per iteration).
+    """
+    max_newton_iters = max(1, min(int(max_newton_iters), NEWTON_OUTER_ITERS_CAP))  # clamp to [1, cap]
+    newton_history: List[Dict[str, Any]] = []
     theta = (
         np.zeros(3, dtype=float)
         if theta_init is None
         else np.asarray(theta_init, dtype=float).copy()
-    )
+    )  # default or caller-supplied warm start (owned copy)
     base_prior = PostflopPrior(
         floor=prior_floor,
         beta_facing=beta_facing,
         beta_no_bet=beta_no_bet,
     )
-    bundles_list = list(bundles_by_hand)
+    bundles_list = list(bundles_by_hand)  # materialize once; closed over by _obj/_grad
 
     last_per_hand: List[Dict[str, float]] = []
     completed = 0
@@ -266,7 +274,20 @@ def run_postflop_theta_newton(
             time.perf_counter() - t_sub,
             time.perf_counter() - t0,
         )
-        if gn < grad_norm_tol:
+        prior_pen = 0.5 * m_l2 * float(np.dot(theta, theta))                         # (l2/2)||theta||^2 MAP penalty
+        data_ll = float(f0 + prior_pen)                                              # data log-likelihood = F + penalty
+        hist_row: Dict[str, Any] = {
+            "outer_iter": outer,
+            "theta_post": [float(theta[i]) for i in range(3)],
+            "map_objective": float(f0),
+            "data_log_likelihood": data_ll,
+            "nll_data": float(-data_ll),
+            "l2_penalty": float(prior_pen),
+            "grad_norm": float(gn),
+            "gradient": [float(g[i]) for i in range(3)],
+        }
+        newton_history.append(hist_row)
+        if gn < grad_norm_tol:                                                       # gradient small: treat as converged
             prior = PostflopActionModel(base_prior, tuple(float(x) for x in theta))
             last_per_hand = _e_step_postflop_all_with_progress(
                 bundles_list,
@@ -292,6 +313,7 @@ def run_postflop_theta_newton(
                         "early_stop": True,
                     }
                 )
+            hist_row["stop"] = "grad_tol"
             break
 
         LOG.info("%s | (3/4) Hessian via finite differences on ∇F…", iter_label)
@@ -302,10 +324,10 @@ def run_postflop_theta_newton(
             eps=hessian_fd_eps,
             log=LOG,
             log_prefix=f"{iter_label} | ",
-        )
+        )                                                                            # symmetric Hessian from FD on grad
         LOG.info("%s | (3/4) Hessian assembled | wall_s=%.2f", iter_label, time.perf_counter() - t_sub)
 
-        direction = newton_maximization_direction(H, g, ridge=hessian_shift_ridge)
+        direction = newton_maximization_direction(H, g, ridge=hessian_shift_ridge)   # shifted Newton solve on noisy H
         LOG.info(
             "%s | Newton direction | |d|=%.5f | (4/4) backtracking line search…",
             iter_label,
@@ -319,9 +341,9 @@ def run_postflop_theta_newton(
             f0,
             log=LOG,
             log_prefix=f"{iter_label} | ",
-        )
+        )                                                                            # admissible alpha and trial state
         LOG.info("%s | (4/4) line search finished | wall_s=%.2f", iter_label, time.perf_counter() - t_sub)
-        if alpha <= 0.0:
+        if alpha <= 0.0:                                                             # no improving step found
             LOG.warning(
                 "Postflop Newton line search failed at iter %d; keeping theta | |grad|=%.4f",
                 outer + 1,
@@ -346,12 +368,16 @@ def run_postflop_theta_newton(
                         "line_search_failed": True,
                     }
                 )
+            hist_row["stop"] = "line_search_failed"
             break
 
-        theta = theta_try
-        if center_each_step:
-            theta -= float(np.mean(theta))
-        theta = np.clip(theta, -clip, clip)
+        theta = theta_try                                                            # accept line-search iterate
+        if center_each_step:                                                         # remove translation gauge in logits
+            theta -= float(np.mean(theta))                                           # center components each outer step
+        theta = np.clip(theta, -clip, clip)                                          # keep theta in stable box
+        hist_row["line_search_alpha"] = float(alpha)
+        hist_row["map_objective_after"] = float(f1)
+        hist_row["theta_post_after"] = [float(theta[i]) for i in range(3)]
 
         LOG.info(
             "Postflop Newton step | iter %d/%d | alpha=%.4g | F: %.4f -> %.4f | "
@@ -388,7 +414,7 @@ def run_postflop_theta_newton(
             label=f"{iter_label} | sync q(c) for next iter",
         )
 
-    if not last_per_hand:
+    if not last_per_hand:                                                            # e.g. zero bundles: still need q(c)
         prior = PostflopActionModel(base_prior, tuple(float(x) for x in theta))
         last_per_hand = _e_step_postflop_all_with_progress(
             bundles_list,
@@ -404,4 +430,8 @@ def run_postflop_theta_newton(
         float(theta[1]),
         float(theta[2]),
     )
+    if diagnostics is not None:                                                      # caller-owned dict for outer traces
+        diagnostics["outer_steps"] = newton_history
+        diagnostics["outer_iters_cap"] = NEWTON_OUTER_ITERS_CAP
+        diagnostics["theta_post_final"] = [float(theta[i]) for i in range(3)]
     return theta, last_per_hand

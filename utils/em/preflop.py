@@ -24,7 +24,6 @@ from utils.action.preflop import (
     canonical_preflop_action,
 )
 from utils.prior.preflop import PreflopPrior
-from utils.strength.preflop import all_169_classes
 
 LOG = logging.getLogger(__name__)
 
@@ -64,8 +63,8 @@ def e_step_hand_class_posterior(
 ) -> Dict[str, float]:
     """Posterior ``q(h) ∝ pi_0(h) * prod_t P(a_t | h, s_t, theta)`` over 169 classes."""
     log_q: Dict[str, float] = {}                             # unnormalized log posterior per 169-class label
-    for h in all_169_classes():                              # sum evidence over all abstract hand types
-        p0 = bundle.initial_range.get(h, 0.0)                # prior mass from observer-removed range
+    # Only classes with positive prior mass can have positive posterior mass (faster than scanning all 169).
+    for h, p0 in bundle.initial_range.items():
         if p0 <= 0.0:                                        # impossible class under initial support
             continue
         logp = math.log(p0)                                  # start log-joint at log pi_0(h)

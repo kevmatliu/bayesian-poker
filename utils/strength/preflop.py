@@ -100,8 +100,14 @@ def get_equivalence_class(cards: List[Card]) -> str:
     return f"{rank1}{rank2}o"
 
 
+_ALL_169_CACHE: list[str] | None = None
+
+
 def all_169_classes() -> List[str]:
-    """All canonical preflop hand labels in a fixed order."""
+    """All canonical preflop hand labels in a fixed order (cached singleton list)."""
+    global _ALL_169_CACHE
+    if _ALL_169_CACHE is not None:
+        return _ALL_169_CACHE
     ranks = "AKQJT98765432"
     classes: List[str] = []
     for i in range(len(ranks)):
@@ -112,5 +118,5 @@ def all_169_classes() -> List[str]:
             else:
                 classes.append(f"{r1}{r2}s")
                 classes.append(f"{r1}{r2}o")
-
+    _ALL_169_CACHE = classes
     return classes

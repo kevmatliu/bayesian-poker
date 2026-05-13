@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
 # Run preflop + postflop combo filtering on sessions in sessions_filter.txt.
-# Uses artifacts/global_priors.json and artifacts/player_thetas.json.
+# Uses artifacts/global_priors.json and artifacts/player_thetas_newton.json.
+# Range CSV defaults to artifacts/filter_sessions_range_history_newton.csv when
+# --range-csv-out is omitted (see runners.filter_sessions).
+#
+# For EM thetas + EM-named CSV, use ./command_filter_em.sh
 #
 # Usage:
 #   ./command_filter.sh [PLURIBUS_ROOT] [SESSIONS_FILE] [PLAYER ...] [-- EXTRA PYTHON ARGS]
@@ -43,5 +47,5 @@ exec .venv/bin/python -m runners.filter_sessions "$ROOT" \
   --sessions-file "$SESSIONS_FILE" \
   --players "${PLAYERS[@]}" \
   --global-priors artifacts/global_priors.json \
-  --player-thetas artifacts/player_thetas.json \
+  --player-thetas artifacts/player_thetas_newton.json \
   "$@"

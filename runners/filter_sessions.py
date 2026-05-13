@@ -18,6 +18,26 @@ from utils.postflop_runner_bridge import POSTFLOP_STREETS
 
 from .execute import LOG, _run_preflop_filter_for_hand, all_combo_keys
 
+# Legacy default; when unchanged, :func:`_range_csv_out_from_player_thetas` picks a suffixed file.
+_DEFAULT_RANGE_HISTORY_CSV = Path("artifacts/filter_sessions_range_history.csv")
+
+
+def _range_csv_out_from_player_thetas(pt_path: Path, explicit_out: Path) -> Path:
+    """Map ``player_thetas_{em|newton}.json`` → ``filter_sessions_range_history_{em|newton}.csv``.
+
+    Avoids EM and Newton runs both writing the same default CSV. A non-default
+    ``--range-csv-out`` is always respected.
+    """
+    if explicit_out != _DEFAULT_RANGE_HISTORY_CSV:
+        return explicit_out
+    stem = pt_path.stem
+    parent = pt_path.parent
+    if stem == "player_thetas_em":
+        return parent / "filter_sessions_range_history_em.csv"
+    if stem == "player_thetas_newton":
+        return parent / "filter_sessions_range_history_newton.csv"
+    return explicit_out
+
 
 def _board_at_street_end(hand, street: str) -> str:
     sts = hand.states.get(street, [])
@@ -156,10 +176,14 @@ def filter_sessions_main(argv: Optional[List[str]] = None) -> int:
     parser.add_argument(
         "--range-csv-out",
         type=Path,
-        default=Path("artifacts/filter_sessions_range_history.csv"),
+        default=_DEFAULT_RANGE_HISTORY_CSV,
         help=(
-            "Write combo-range history CSV (metadata + 1326 combo columns per row); "
-            "same column layout as ``online_range_history.csv``."
+            "Write combo-range history CSV (metadata + 1326 combo columns per row). "
+            "Default path is ``artifacts/filter_sessions_range_history.csv``; when left at "
+            "that default and ``--player-thetas`` is ``player_thetas_em.json`` or "
+            "``player_thetas_newton.json``, the output is auto-set to the matching "
+            "``filter_sessions_range_history_{em|newton}.csv`` so EM vs Newton runs do not "
+            "overwrite each other."
         ),
     )
     parser.add_argument(
@@ -202,6 +226,15 @@ def filter_sessions_main(argv: Optional[List[str]] = None) -> int:
     if not pt_path.is_file():
         LOG.error("Player thetas JSON not found: %s", pt_path)
         return 2
+
+    resolved_range = _range_csv_out_from_player_thetas(pt_path, args.range_csv_out)
+    if resolved_range != args.range_csv_out:
+        LOG.info(
+            "Range CSV output derived from player thetas filename → %s "
+            "(pass --range-csv-out explicitly to override).",
+            resolved_range,
+        )
+        args.range_csv_out = resolved_range
 
     raw_doc = load_json(pt_path)
     if not isinstance(raw_doc, dict):

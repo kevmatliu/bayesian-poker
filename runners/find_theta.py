@@ -36,6 +36,7 @@ from .common import (
 )
 from utils.em import run_postflop_theta_em, run_preflop_em
 from utils.em.common import POSTFLOP_M_BATCH_SIZE, PREFLOP_M_BATCH_SIZE
+from utils.newton.common import NEWTON_OUTER_ITERS_CAP
 from utils.newton import run_postflop_theta_newton, run_preflop_newton
 
 LOG = logging.getLogger("find_theta")
@@ -488,8 +489,8 @@ def learn_player_thetas(
     Steps per player: gather preflop bundles (observer dead cards → 169 prior), fit ``theta_pre``;
     gather postflop combo bundles, fit ``theta_post``; merge into ``players_out[player]``.
     Use ``theta_method='em'`` or ``'newton'`` to pick :func:`run_preflop_em` vs :func:`run_preflop_newton`
-    (and postflop analogues). ``preflop_em_iters`` / ``postflop_em_iters`` double as Newton iteration caps
-    when ``theta_method=='newton'``.
+    (and postflop analogues). ``preflop_em_iters`` / ``postflop_em_iters`` request outer Newton steps when
+    ``theta_method=='newton'``; effective outer Newton steps are ``min(..., NEWTON_OUTER_ITERS_CAP)``.
 
     ``warm_start_path`` may seed ``theta`` from a prior ``player_thetas.json``.
     """
@@ -570,6 +571,8 @@ def learn_player_thetas(
             cur_postflop_req = postflop_require_observer
 
         appears_in_hands = sum(1 for ref in refs if player in ref.hand.player_names)
+        preflop_newton_diag: Dict[str, Any] = {}
+        postflop_newton_diag: Dict[str, Any] = {}
         bundles, bundle_metas = gather_preflop_bundles_for_target_player(
             refs,
             resolved,
@@ -637,11 +640,13 @@ def learn_player_thetas(
         if bundles:
             fit_label = "Newton" if tm == "newton" else "EM"
             LOG.info(
-                "Player %s | starting preflop %s | bundles=%d | outer_or_newton_iters=%d | m_steps=%d | m_batch_size=%d",
+                "Player %s | starting preflop %s | bundles=%d | outer_or_newton_iters=%d "
+                "(Newton capped at %d) | m_steps=%d | m_batch_size=%d",
                 player,
                 fit_label,
                 len(bundles),
                 preflop_em_iters,
+                NEWTON_OUTER_ITERS_CAP,
                 preflop_m_steps,
                 preflop_m_batch_size,
             )
@@ -656,6 +661,7 @@ def learn_player_thetas(
                     m_l2=preflop_m_l2,
                     history_hook=_em_write if em_log_f is not None else None,
                     bundle_meta=bundle_metas,
+                    diagnostics=preflop_newton_diag,
                 )
             else:
                 theta_pre, _ = run_preflop_em(
@@ -706,11 +712,13 @@ def learn_player_thetas(
         if postflop_bundles:
             fit_label = "Newton" if tm == "newton" else "EM"
             LOG.info(
-                "Player %s | starting postflop %s | bundles=%d | outer_or_newton_iters=%d | m_steps=%d | m_batch_size=%d",
+                "Player %s | starting postflop %s | bundles=%d | outer_or_newton_iters=%d "
+                "(Newton capped at %d) | m_steps=%d | m_batch_size=%d",
                 player,
                 fit_label,
                 len(postflop_bundles),
                 postflop_em_iters,
+                NEWTON_OUTER_ITERS_CAP,
                 postflop_m_steps,
                 postflop_m_batch_size,
             )
@@ -726,6 +734,7 @@ def learn_player_thetas(
                     clip=postflop_clip,
                     history_hook=_em_write if em_log_f is not None else None,
                     hand_meta=postflop_bundle_metas,
+                    diagnostics=postflop_newton_diag,
                 )
             else:
                 theta_post, _ = run_postflop_theta_em(
@@ -770,6 +779,17 @@ def learn_player_thetas(
             "observer_target_pair_label": pair_label,
             "em_history_jsonl": str(em_log_path.resolve()) if em_log_path is not None else None,
         }
+        if tm == "newton":
+            players_out[player]["preflop_newton_outer_steps"] = list(preflop_newton_diag.get("outer_steps", []))
+            players_out[player]["preflop_newton_meta"] = {
+                "outer_iters_cap": preflop_newton_diag.get("outer_iters_cap"),
+                "theta_pre_final": preflop_newton_diag.get("theta_pre_final"),
+            }
+            players_out[player]["postflop_newton_outer_steps"] = list(postflop_newton_diag.get("outer_steps", []))
+            players_out[player]["postflop_newton_meta"] = {
+                "outer_iters_cap": postflop_newton_diag.get("outer_iters_cap"),
+                "theta_post_final": postflop_newton_diag.get("theta_post_final"),
+            }
 
         if em_log_f is not None:
             _em_write({"kind": "em_player_segment_end", "note": f"Finished θ fit ({tm}) for this player"})
@@ -779,10 +799,14 @@ def learn_player_thetas(
         notes: Dict[str, str] = {
             "preflop_newton": (
                 "theta_pre from Newton on marginal observed-data log-likelihood (MAP, same L2 as EM); "
-                "``preflop_em_iters`` caps Newton iterations."
+                f"outer Newton iterations are at most {NEWTON_OUTER_ITERS_CAP} "
+                "(``min(preflop_em_iters, cap)``)."
             ),
             "postflop_newton": (
-                "theta_post from the same Newton objective; ``postflop_em_iters`` caps iterations."
+                "theta_post from the same Newton objective; "
+                f"outer iterations at most {NEWTON_OUTER_ITERS_CAP} "
+                "(``min(postflop_em_iters, cap)``). Per-iter NLL/gradient history is under each player’s "
+                "``preflop_newton_outer_steps`` / ``postflop_newton_outer_steps``."
             ),
         }
     else:

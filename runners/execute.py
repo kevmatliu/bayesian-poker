@@ -332,6 +332,7 @@ def _run_postflop_combo_filter_for_hand(
             len(target_actions),
         )
 
+    observer_hole_cards = hand.hole_cards.get(observer, "")
     if learned_postflop_model is not None:
         baseline_pf = learned_postflop_model.prior
         theta_pf = learned_postflop_model.theta_post
@@ -341,7 +342,7 @@ def _run_postflop_combo_filter_for_hand(
     combo_filter = ComboRangeFilter(
         observer_name=observer,
         target_name=target,
-        observer_hole_cards=observer_hole,
+        observer_hole_cards=observer_hole_cards,
         prior_model=baseline_pf,
         theta_post=theta_pf,
     )

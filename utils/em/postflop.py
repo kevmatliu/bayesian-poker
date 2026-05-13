@@ -244,7 +244,7 @@ def m_step_theta_post_gradient_ascent(
     l2: float = 0.25,
     lr: float = 0.05,
     steps: int = 200,
-    clip: float = 3.0,
+    clip: float = 10000.,
     center_each_step: bool = True,
     grad_norm_tol: float = M_STEP_GRAD_NORM_TOL,
 ) -> Tuple[np.ndarray, int]:
@@ -278,7 +278,6 @@ def m_step_theta_post_gradient_ascent(
         theta += lr * g                                             # ascent on expected complete-data log-likelihood
         if center_each_step:
             theta -= float(np.mean(theta))                          # remove gauge / improve conditioning
-        theta = np.clip(theta, -clip, clip)                         # keep logits perturbation bounded
 
     return theta, used
 
@@ -292,7 +291,6 @@ def m_step_theta_post_gradient_ascent_bundles(
     l2: float = 0.25,
     lr: float = 0.05,
     steps: int = 200,
-    clip: float = 3.0,
     center_each_step: bool = True,
     outer_1based: int = 1,
     num_outer_iterations: int = 1,
@@ -353,7 +351,6 @@ def m_step_theta_post_gradient_ascent_bundles(
         theta += lr * g
         if center_each_step:
             theta -= float(np.mean(theta))
-        theta = np.clip(theta, -clip, clip)
 
         if step_i == 0 or step_i == steps - 1 or (step_i + 1) % log_every == 0:  # periodic trace logging
             LOG.info(

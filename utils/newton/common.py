@@ -18,23 +18,26 @@ NEWTON_HESSIAN_SHIFT_RIDGE = 1e-3
 NEWTON_LINE_SEARCH_BACKTRACK = 0.5
 NEWTON_LINE_SEARCH_MIN_ALPHA = 1e-6
 
+# Hard cap on outer Newton iterations (preflop/postflop θ fits).
+NEWTON_OUTER_ITERS_CAP = 3
+
 
 def log_sum_exp(values: Sequence[float]) -> float:
     """Numerically stable ``log(sum exp(v_i))``; ``-inf`` if empty."""
-    arr = np.asarray(list(values), dtype=float)
+    arr = np.asarray(list(values), dtype=float)                   # float vector for max / exp
     if arr.size == 0:
         return float("-inf")
-    m = float(np.max(arr))
+    m = float(np.max(arr))                                        # subtract m before exp to avoid overflow
     if not np.isfinite(m):
-        return m
-    return m + float(np.log(np.sum(np.exp(arr - m))))
+        return m                                                  # no stable correction if max is non-finite
+    return m + float(np.log(np.sum(np.exp(arr - m))))             # log(sum exp v) = m + log(sum exp(v−m))
 
 
 def log_sum_exp_mapping(log_weights: Mapping[str, float]) -> float:
     """``log(sum exp(log_w[k]))`` over a string-keyed map."""
     if not log_weights:
         return float("-inf")
-    return log_sum_exp(list(log_weights.values()))
+    return log_sum_exp(list(log_weights.values()))                # map values are log-weights; stable LSE
 
 
 def hessian_from_gradient_fd(
@@ -58,10 +61,10 @@ def hessian_from_gradient_fd(
             )
         t0 = time.perf_counter()
         step = np.zeros(k, dtype=float)
-        step[j] = eps
-        gp = grad_fn(theta + step)
-        gm = grad_fn(theta - step)
-        H[:, j] = (gp - gm) / (2.0 * eps)
+        step[j] = eps                                                # perturb θ_j only
+        gp = grad_fn(theta + step)                                   # g(θ + ε e_j)
+        gm = grad_fn(theta - step)                                   # g(θ − ε e_j)
+        H[:, j] = (gp - gm) / (2.0 * eps)                            # central-difference column ∂g/∂θ_j
         if log is not None:
             log.info(
                 "%sHessian FD | column %d/%d done | wall_s=%.2f",
@@ -70,7 +73,7 @@ def hessian_from_gradient_fd(
                 k,
                 time.perf_counter() - t0,
             )
-    return (H + H.T) * 0.5
+    return (H + H.T) * 0.5                                           # symmetrize noisy FD columns
 
 
 def newton_maximization_direction(
@@ -84,11 +87,11 @@ def newton_maximization_direction(
     For a local maximum of ``F``, ``H = ∇² F`` should be negative semi-definite; if finite differencing
     yields indefinite curvature, shifting by ``max(eig(H), 0) + ridge`` stabilizes the update.
     """
-    Hs = (H + H.T) * 0.5
-    w = np.linalg.eigvalsh(Hs)
-    shift = max(float(w.max()), 0.0) + float(ridge)
-    H_shifted = Hs - shift * np.eye(len(g), dtype=float)
-    return np.linalg.solve(H_shifted, -g)
+    Hs = (H + H.T) * 0.5                                          # symmetrize before spectrum (FD noise)
+    w = np.linalg.eigvalsh(Hs)                                    # real symmetric ⇒ real eigenvalues
+    shift = max(float(w.max()), 0.0) + float(ridge)               # make (H − shift·I) negative definite
+    H_shifted = Hs - shift * np.eye(len(g), dtype=float)          # shifted Newton system matrix
+    return np.linalg.solve(H_shifted, -g)                         # Newton ascent on concave surrogate
 
 
 def backtracking_line_search(
@@ -112,7 +115,7 @@ def backtracking_line_search(
     trial_n = 0
     while alpha >= min_alpha:
         trial_n += 1
-        trial = theta + alpha * d
+        trial = theta + alpha * d                                  # trial point along search direction
         if log is not None:
             log.info(
                 "%sline search | trial %d | alpha=%.4g | evaluating MAP objective (all bundles)…",
@@ -131,7 +134,7 @@ def backtracking_line_search(
                 val,
                 time.perf_counter() - t0,
             )
-        if val >= current_value - 1e-12:
+        if val >= current_value - 1e-12:                           # monotone MAP improvement (tiny slack)
             return alpha, trial, val
         if log is not None:
             log.info(
@@ -139,7 +142,7 @@ def backtracking_line_search(
                 log_prefix,
                 trial_n,
             )
-        alpha *= backtrack
+        alpha *= backtrack                                         # shrink α and retry
     if log is not None:
         log.warning("%sline search | exhausted (alpha < %.1e)", log_prefix, min_alpha)
-    return 0.0, theta.copy(), current_value
+    return 0.0, theta.copy(), current_value                        # no acceptable α: freeze θ and F(θ)

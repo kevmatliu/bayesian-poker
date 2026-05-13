@@ -1,0 +1,518 @@
+{
+  "schema": "bayesian_poker.player_thetas.v1",
+  "global_priors_path": "/Users/kevinliu/Desktop/bayesian poker/artifacts/global_priors.json",
+  "hands_used": 541,
+  "theta_method": "newton",
+  "players": {
+    "MrBlue": {
+      "theta_pre": [
+        -0.054147386021185136,
+        0.22652744877966513,
+        -0.1723800935251027
+      ],
+      "theta_post": [
+        0.2750782393526783,
+        -0.008339613273266768,
+        -0.26673862607941157
+      ],
+      "preflop_theta_labels": [
+        "fold_tilt",
+        "call_tilt",
+        "raise_tilt"
+      ],
+      "postflop_theta_labels": [
+        "fold_tilt",
+        "passive_tilt",
+        "aggression_tilt"
+      ],
+      "preflop_bundles": 1058,
+      "postflop_bundles": 242,
+      "postflop_hands": 242,
+      "loaded_hands_with_this_player_name": 541,
+      "preflop_observer_names_merged_for_this_target": [
+        "Bill",
+        "Pluribus"
+      ],
+      "preflop_em_observers_filter": null,
+      "postflop_require_observer": null,
+      "observer_target_pair_label": null,
+      "em_history_jsonl": null,
+      "preflop_newton_outer_steps": [
+        {
+          "outer_iter": 0,
+          "theta_pre": [
+            0.0,
+            0.0,
+            0.0
+          ],
+          "map_objective": -835.0914052545851,
+          "data_log_likelihood": -835.0914052545851,
+          "nll_data": 835.0914052545851,
+          "l2_penalty": 0.0,
+          "grad_norm": 42.62677048342322,
+          "gradient": [
+            -7.815740774387085,
+            33.2797349523505,
+            -25.463994177962828
+          ],
+          "line_search_alpha": 1.0,
+          "map_objective_after": -828.5860928156419,
+          "theta_pre_after": [
+            -0.054242270666455365,
+            0.22665243182782077,
+            -0.17241019220521728
+          ]
+        },
+        {
+          "outer_iter": 1,
+          "theta_pre": [
+            -0.054242270666455365,
+            0.22665243182782077,
+            -0.17241019220521728
+          ],
+          "map_objective": -828.5860928156419,
+          "data_log_likelihood": -828.5755879627474,
+          "nll_data": 828.5755879627474,
+          "l2_penalty": 0.010504852894594739,
+          "grad_norm": 5.0300359353332675,
+          "gradient": [
+            3.688580233626038,
+            -3.4083913451943477,
+            -0.28018888067082115
+          ],
+          "line_search_alpha": 0.0078125,
+          "map_objective_after": -828.5860904169159,
+          "theta_pre_after": [
+            -0.054147386021185136,
+            0.22652744877966513,
+            -0.1723800935251027
+          ]
+        },
+        {
+          "outer_iter": 2,
+          "theta_pre": [
+            -0.054147386021185136,
+            0.22652744877966513,
+            -0.1723800935251027
+          ],
+          "map_objective": -828.5860904169159,
+          "data_log_likelihood": -828.5755952267775,
+          "nll_data": 828.5755952267775,
+          "l2_penalty": 0.010495190138409275,
+          "grad_norm": 4.990742964124918,
+          "gradient": [
+            3.6597684169691216,
+            -3.381763398285122,
+            -0.2780050109921775
+          ],
+          "stop": "line_search_failed"
+        }
+      ],
+      "preflop_newton_meta": {
+        "outer_iters_cap": 3,
+        "theta_pre_final": [
+          -0.054147386021185136,
+          0.22652744877966513,
+          -0.1723800935251027
+        ]
+      },
+      "postflop_newton_outer_steps": [
+        {
+          "outer_iter": 0,
+          "theta_post": [
+            0.0,
+            0.0,
+            0.0
+          ],
+          "map_objective": -420.01710237888926,
+          "data_log_likelihood": -420.01710237888926,
+          "nll_data": 420.01710237888926,
+          "l2_penalty": 0.0,
+          "grad_norm": 31.6577699297717,
+          "gradient": [
+            11.948258393507427,
+            13.876224439508345,
+            -25.824482833015804
+          ],
+          "line_search_alpha": 1.0,
+          "map_objective_after": -415.1118167985225,
+          "theta_post_after": [
+            0.2603387422310967,
+            -0.009583553633272719,
+            -0.250755188597824
+          ]
+        },
+        {
+          "outer_iter": 1,
+          "theta_post": [
+            0.2603387422310967,
+            -0.009583553633272719,
+            -0.250755188597824
+          ],
+          "map_objective": -415.1118167985225,
+          "data_log_likelihood": -415.0954735147956,
+          "nll_data": 415.0954735147956,
+          "l2_penalty": 0.01634328372693019,
+          "grad_norm": 1.9754443954579581,
+          "gradient": [
+            0.5652591771288845,
+            1.025633315739124,
+            -1.5908924928680142
+          ],
+          "line_search_alpha": 1.0,
+          "map_objective_after": -415.0942507619453,
+          "theta_post_after": [
+            0.2750782393526783,
+            -0.008339613273266768,
+            -0.26673862607941157
+          ]
+        },
+        {
+          "outer_iter": 2,
+          "theta_post": [
+            0.2750782393526783,
+            -0.008339613273266768,
+            -0.26673862607941157
+          ],
+          "map_objective": -415.0942507619454,
+          "data_log_likelihood": -415.0758898767507,
+          "nll_data": 415.0758898767507,
+          "l2_penalty": 0.018360885194706144,
+          "grad_norm": 0.008913455667489191,
+          "gradient": [
+            0.0020700306606428742,
+            0.0050074242238773575,
+            -0.007077454884520273
+          ],
+          "stop": "grad_tol"
+        }
+      ],
+      "postflop_newton_meta": {
+        "outer_iters_cap": 3,
+        "theta_post_final": [
+          0.2750782393526783,
+          -0.008339613273266768,
+          -0.26673862607941157
+        ]
+      }
+    },
+    "Bill": {
+      "theta_pre": [
+        0.06319467379569757,
+        -0.17607091391570667,
+        0.11287626930698699
+      ],
+      "theta_post": [
+        -0.10972477365796365,
+        0.042099989005385426,
+        0.06762478465257823
+      ],
+      "preflop_theta_labels": [
+        "fold_tilt",
+        "call_tilt",
+        "raise_tilt"
+      ],
+      "postflop_theta_labels": [
+        "fold_tilt",
+        "passive_tilt",
+        "aggression_tilt"
+      ],
+      "preflop_bundles": 1072,
+      "postflop_bundles": 200,
+      "postflop_hands": 200,
+      "loaded_hands_with_this_player_name": 541,
+      "preflop_observer_names_merged_for_this_target": [
+        "MrBlue",
+        "Pluribus"
+      ],
+      "preflop_em_observers_filter": null,
+      "postflop_require_observer": null,
+      "observer_target_pair_label": null,
+      "em_history_jsonl": null,
+      "preflop_newton_outer_steps": [
+        {
+          "outer_iter": 0,
+          "theta_pre": [
+            0.0,
+            0.0,
+            0.0
+          ],
+          "map_objective": -829.1560693717031,
+          "data_log_likelihood": -829.1560693717031,
+          "nll_data": 829.1560693717031,
+          "l2_penalty": 0.0,
+          "grad_norm": 33.21271623619588,
+          "gradient": [
+            12.972721415813156,
+            -27.109736624419643,
+            14.13701520860653
+          ],
+          "line_search_alpha": 1.0,
+          "map_objective_after": -826.5329290775207,
+          "theta_pre_after": [
+            0.06319467379569757,
+            -0.17607091391570667,
+            0.11287626930698699
+          ]
+        },
+        {
+          "outer_iter": 1,
+          "theta_pre": [
+            0.06319467379569757,
+            -0.17607091391570667,
+            0.11287626930698699
+          ],
+          "map_objective": -826.5329290775207,
+          "data_log_likelihood": -826.5269621293088,
+          "nll_data": 826.5269621293088,
+          "l2_penalty": 0.005966948211990034,
+          "grad_norm": 2.95730738516569,
+          "gradient": [
+            1.9445725068074011,
+            -2.21196839470261,
+            0.267395880598542
+          ],
+          "stop": "line_search_failed"
+        }
+      ],
+      "preflop_newton_meta": {
+        "outer_iters_cap": 3,
+        "theta_pre_final": [
+          0.06319467379569757,
+          -0.17607091391570667,
+          0.11287626930698699
+        ]
+      },
+      "postflop_newton_outer_steps": [
+        {
+          "outer_iter": 0,
+          "theta_post": [
+            0.0,
+            0.0,
+            0.0
+          ],
+          "map_objective": -392.6959152434034,
+          "data_log_likelihood": -392.6959152434034,
+          "nll_data": 392.6959152434034,
+          "l2_penalty": 0.0,
+          "grad_norm": 5.812218397539348,
+          "gradient": [
+            -4.661622415939063,
+            1.560812059425673,
+            3.100810356513392
+          ],
+          "line_search_alpha": 1.0,
+          "map_objective_after": -392.3049999953506,
+          "theta_post_after": [
+            -0.10972477365796365,
+            0.042099989005385426,
+            0.06762478465257823
+          ]
+        },
+        {
+          "outer_iter": 1,
+          "theta_post": [
+            -0.10972477365796365,
+            0.042099989005385426,
+            0.06762478465257823
+          ],
+          "map_objective": -392.3049999953506,
+          "data_log_likelihood": -392.30270186453464,
+          "nll_data": 392.30270186453464,
+          "l2_penalty": 0.0022981308159815634,
+          "grad_norm": 0.06779014286022875,
+          "gradient": [
+            0.04002542963821743,
+            0.013096581023784094,
+            -0.05312201066200136
+          ],
+          "stop": "grad_tol"
+        }
+      ],
+      "postflop_newton_meta": {
+        "outer_iters_cap": 3,
+        "theta_post_final": [
+          -0.10972477365796365,
+          0.042099989005385426,
+          0.06762478465257823
+        ]
+      }
+    },
+    "Pluribus": {
+      "theta_pre": [
+        0.1610649436798787,
+        -0.15414880013488907,
+        -0.006916077348344036
+      ],
+      "theta_post": [
+        0.04227989217527849,
+        -0.07466279841118514,
+        0.032382906235906644
+      ],
+      "preflop_theta_labels": [
+        "fold_tilt",
+        "call_tilt",
+        "raise_tilt"
+      ],
+      "postflop_theta_labels": [
+        "fold_tilt",
+        "passive_tilt",
+        "aggression_tilt"
+      ],
+      "preflop_bundles": 1076,
+      "postflop_bundles": 198,
+      "postflop_hands": 198,
+      "loaded_hands_with_this_player_name": 541,
+      "preflop_observer_names_merged_for_this_target": [
+        "Bill",
+        "MrBlue"
+      ],
+      "preflop_em_observers_filter": null,
+      "postflop_require_observer": null,
+      "observer_target_pair_label": null,
+      "em_history_jsonl": null,
+      "preflop_newton_outer_steps": [
+        {
+          "outer_iter": 0,
+          "theta_pre": [
+            0.0,
+            0.0,
+            0.0
+          ],
+          "map_objective": -784.2412132061075,
+          "data_log_likelihood": -784.2412132061075,
+          "nll_data": 784.2412132061075,
+          "l2_penalty": 0.0,
+          "grad_norm": 57.639823560644516,
+          "gradient": [
+            46.449628187991905,
+            -29.78215051582811,
+            -16.66747767216436
+          ],
+          "line_search_alpha": 1.0,
+          "map_objective_after": -779.3788491725866,
+          "theta_pre_after": [
+            0.1610649436798787,
+            -0.15414880013488907,
+            -0.006916077348344036
+          ]
+        },
+        {
+          "outer_iter": 1,
+          "theta_pre": [
+            0.1610649436798787,
+            -0.15414880013488907,
+            -0.006916077348344036
+          ],
+          "map_objective": -779.3788491725866,
+          "data_log_likelihood": -779.3726302224876,
+          "nll_data": 779.3726302224876,
+          "l2_penalty": 0.006218950098939594,
+          "grad_norm": 3.390431650307917,
+          "gradient": [
+            2.26336367137967,
+            -2.5120448532071156,
+            0.24868116527804704
+          ],
+          "stop": "line_search_failed"
+        }
+      ],
+      "preflop_newton_meta": {
+        "outer_iters_cap": 3,
+        "theta_pre_final": [
+          0.1610649436798787,
+          -0.15414880013488907,
+          -0.006916077348344036
+        ]
+      },
+      "postflop_newton_outer_steps": [
+        {
+          "outer_iter": 0,
+          "theta_post": [
+            0.0,
+            0.0,
+            0.0
+          ],
+          "map_objective": -356.2690925977632,
+          "data_log_likelihood": -356.2690925977632,
+          "nll_data": 356.2690925977632,
+          "l2_penalty": 0.0,
+          "grad_norm": 13.90268211816093,
+          "gradient": [
+            2.274471462626907,
+            -10.768558055563012,
+            8.49408659293608
+          ],
+          "line_search_alpha": 1.0,
+          "map_objective_after": -355.6800642556846,
+          "theta_post_after": [
+            0.04134805766648446,
+            -0.07484968383528422,
+            0.03350162616879976
+          ]
+        },
+        {
+          "outer_iter": 1,
+          "theta_post": [
+            0.04134805766648446,
+            -0.07484968383528422,
+            0.03350162616879976
+          ],
+          "map_objective": -355.6800642556846,
+          "data_log_likelihood": -355.6790099436847,
+          "nll_data": 355.6790099436847,
+          "l2_penalty": 0.0010543119998733675,
+          "grad_norm": 0.148577377431568,
+          "gradient": [
+            0.023318816419963518,
+            0.09144147996659632,
+            -0.11476029638656922
+          ],
+          "line_search_alpha": 1.0,
+          "map_objective_after": -355.6799806671086,
+          "theta_post_after": [
+            0.04227989217527849,
+            -0.07466279841118514,
+            0.032382906235906644
+          ]
+        },
+        {
+          "outer_iter": 2,
+          "theta_post": [
+            0.04227989217527849,
+            -0.07466279841118514,
+            0.032382906235906644
+          ],
+          "map_objective": -355.6799806671086,
+          "data_log_likelihood": -355.678929320188,
+          "nll_data": 355.678929320188,
+          "l2_penalty": 0.001051346920653246,
+          "grad_norm": 3.518908203651085e-05,
+          "gradient": [
+            7.24839183691324e-06,
+            2.0453415235537065e-05,
+            -2.7701807081011165e-05
+          ],
+          "stop": "grad_tol"
+        }
+      ],
+      "postflop_newton_meta": {
+        "outer_iters_cap": 3,
+        "theta_post_final": [
+          0.04227989217527849,
+          -0.07466279841118514,
+          0.032382906235906644
+        ]
+      }
+    }
+  },
+  "player_identity": {
+    "theta_key": "Exact player name string from parsed .phh files (case-sensitive).",
+    "cross_session": "The same string in different session folders denotes the same \u03b8; a roster name that only appears in session A never receives updates from session B.",
+    "isolation": "Each entry in ``players`` is fit in a separate loop. Updating one name does not change tensors or JSON fields for any other name."
+  },
+  "notes": {
+    "preflop_newton": "theta_pre from Newton on marginal observed-data log-likelihood (MAP, same L2 as EM); outer Newton iterations are at most 3 (``min(preflop_em_iters, cap)``).",
+    "postflop_newton": "theta_post from the same Newton objective; outer iterations at most 3 (``min(postflop_em_iters, cap)``). Per-iter NLL/gradient history is under each player\u2019s ``preflop_newton_outer_steps`` / ``postflop_newton_outer_steps``."
+  }
+}

@@ -1,4 +1,4 @@
-"""Weighted made/draw distribution plot for one calibrated range-history row."""
+"""Weighted made-strength distribution plot for one calibrated range-history row."""
 
 from __future__ import annotations
 
@@ -12,10 +12,8 @@ import pandas as pd
 from utils.eval.online_csv import load_hand_pluribus
 from utils.eval.strength import made_percentile_vector_1326
 from utils.eval.table import betting_history_on_street, betting_history_up_to_street_end
-from utils.filter.postflop import parse_combo_key
-from utils.parse import Hand, parse_cards
+from utils.parse import Hand
 from utils.strength.fast_eval import all_combo_keys_fast
-from utils.strength.postflop import draw_strength_from_hand
 
 
 def _subset_row(
@@ -80,14 +78,13 @@ def plot_made_distribution(
     pluribus_root: Optional[Path] = None,
     hand: Optional[Hand] = None,
     n_bins_made: int = 40,
-    n_bins_draw: int = 40,
-    figsize: Tuple[float, float] = (11.0, 7.5),
+    figsize: Tuple[float, float] = (10.0, 5.0),
     text_width: int = 130,
 ):
     """
     For one ``(session, hand_number, observer, target, street)`` row in a calibrated
-    range dataframe, plot weighted made- and draw-strength histograms and vertical
-    lines at the realized ``actual_made_pct`` / ``actual_draw``.
+    range dataframe, plot the weighted made-strength histogram and a vertical line at
+    the realized ``actual_made_pct`` (when defined).
 
     **Betting context** (shown under the axes): if columns ``betting_prior_streets`` and
     ``betting_this_street`` exist (e.g. from :func:`enrich_online_range_dataframe`), those
@@ -120,65 +117,31 @@ def plot_made_distribution(
         row, hand, pluribus_root, session, hand_number, street                                                    # caption inputs
     )
 
-    fig, (ax_m, ax_d) = plt.subplots(1, 2, figsize=figsize)                                                       # side-by-side made vs draw panels
+    fig, ax_m = plt.subplots(figsize=figsize)
 
-    if len(board) >= 6 and street != "pre-flop":                                                                  # postflop with at least flop present
-        perc = made_percentile_vector_1326(board)                                                                 # nan-masked percentile field
-        board_cards = parse_cards([board[i : i + 2] for i in range(0, len(board), 2)])                            # structured board list
-        draws = np.full(1326, np.nan, dtype=np.float64)                                                           # parallel draw scores (nan when invalid)
-        for j, k in enumerate(keys):                                                                              # fill draw score per combo column order
-            ca, cb = parse_combo_key(k)                                                                           # hole cards for this combo key
-            try:
-                draws[j] = float(draw_strength_from_hand([ca, cb], board_cards))                                  # heuristic draw vs board
-            except ValueError:
-                draws[j] = float("nan")                                                                           # illegal card interaction -> ignore in plots
-
-        live_m = np.isfinite(perc) & (p > 0)                                                                      # support mask for made histogram
-        if np.any(live_m):                                                                                        # skip plotting if no live positive mass
-            w_m = p[live_m]                                                                                       # weights on live made support
-            x_m = perc[live_m]                                                                                    # percentile samples matching weights
-            w_m = w_m / float(w_m.sum())                                                                          # renorm weights after masking
+    if len(board) >= 6 and street != "pre-flop":
+        perc = made_percentile_vector_1326(board)
+        live_m = np.isfinite(perc) & (p > 0)
+        if np.any(live_m):
+            w_m = p[live_m]
+            x_m = perc[live_m]
+            w_m = w_m / float(w_m.sum())
             counts_m, edges_m = np.histogram(
-                x_m, bins=int(n_bins_made), range=(0.0, 1.0), weights=w_m, density=False                          # fixed [0,1] support
+                x_m, bins=int(n_bins_made), range=(0.0, 1.0), weights=w_m, density=False
             )
-            c_m = 0.5 * (edges_m[:-1] + edges_m[1:])                                                              # bin centers
-            ax_m.bar(c_m, counts_m, width=np.diff(edges_m), align="center", edgecolor="black", linewidth=0.4)     # weighted made hist
-        am = float(row.get("actual_made_pct", float("nan")))                                                      # realized made percentile from calibration
-        if np.isfinite(am):                                                                                       # draw vertical truth line when known
-            ax_m.axvline(am, color="C3", linestyle="-", linewidth=2.0, label=f"actual made={am:.3f}")             # truth marker
+            c_m = 0.5 * (edges_m[:-1] + edges_m[1:])
+            ax_m.bar(c_m, counts_m, width=np.diff(edges_m), align="center", edgecolor="black", linewidth=0.4)
+        am = float(row.get("actual_made_pct", float("nan")))
+        if np.isfinite(am):
+            ax_m.axvline(am, color="C3", linestyle="-", linewidth=2.0, label=f"actual made={am:.3f}")
 
-        live_d = np.isfinite(draws) & (p > 0)                                                                     # support mask for draw histogram
-        if np.any(live_d):                                                                                        # plot only if something to show
-            w_d = p[live_d]                                                                                       # draw-axis weights
-            x_d = draws[live_d]                                                                                   # draw strengths
-            w_d = w_d / float(w_d.sum())                                                                          # normalize masked weights
-            d_min = float(np.nanmin(x_d))                                                                         # empirical min for bin range
-            d_max = float(np.nanmax(x_d))                                                                         # empirical max for bin range
-            if d_max <= d_min:                                                                                    # degenerate range guard
-                d_max = d_min + 1e-6                                                                              # widen trivially to satisfy histogram api
-            counts_d, edges_d = np.histogram(
-                x_d, bins=int(n_bins_draw), range=(d_min, d_max), weights=w_d, density=False                      # data-driven draw span
-            )
-            c_d = 0.5 * (edges_d[:-1] + edges_d[1:])                                                              # draw bin centers
-            ax_d.bar(c_d, counts_d, width=np.diff(edges_d), align="center", edgecolor="black", linewidth=0.4)     # weighted draw hist
-        ad = float(row.get("actual_draw", float("nan")))                                                          # realized draw score
-        if np.isfinite(ad):                                                                                       # truth line when defined
-            ax_d.axvline(ad, color="C3", linestyle="-", linewidth=2.0, label=f"actual draw={ad:.3f}")             # draw truth marker
-
-        ax_m.set_xlabel("made strength percentile")                                                               # axis label
-        ax_m.set_ylabel("probability mass in bin")                                                                # axis label
-        ax_m.set_title("Made (weighted)")                                                                         # panel title
-        ax_m.legend(loc="upper right", fontsize=8)                                                                # compact legend
-        ax_m.grid(True, alpha=0.3)                                                                                # subtle grid
-
-        ax_d.set_xlabel("draw strength (heuristic)")                                                              # axis label
-        ax_d.set_ylabel("probability mass in bin")                                                                # axis label
-        ax_d.set_title("Draw (weighted)")                                                                         # panel title
-        ax_d.legend(loc="upper right", fontsize=8)                                                                # compact legend
-        ax_d.grid(True, alpha=0.3)                                                                                # subtle grid
+        ax_m.set_xlabel("made strength percentile")
+        ax_m.set_ylabel("probability mass in bin")
+        ax_m.set_title("Made (weighted)")
+        ax_m.legend(loc="upper right", fontsize=8)
+        ax_m.grid(True, alpha=0.3)
     else:
-        ax_m.text(0.5, 0.5, "preflop or no board", ha="center", va="center", transform=ax_m.transAxes)            # placeholder message
-        ax_d.text(0.5, 0.5, "preflop or no board", ha="center", va="center", transform=ax_d.transAxes)            # placeholder message
+        ax_m.text(0.5, 0.5, "preflop or no board", ha="center", va="center", transform=ax_m.transAxes)
 
     supt = (
         f"{session} #{hand_number} | {observer}→{target} | {street} | board={board!r} hole={hole!r}"              # one-line context title
@@ -192,5 +155,5 @@ def plot_made_distribution(
     caption = block_a + "\n\n" + block_b                                                                          # concatenate blocks for figure text
     fig.text(0.02, 0.02, caption, fontsize=8, family="monospace", va="bottom", ha="left")                         # render betting appendix
 
-    plt.subplots_adjust(bottom=0.28, top=0.88, wspace=0.25)                                                       # leave room for caption and title
-    return fig, (ax_m, ax_d)                                                                                      # return figure and axes tuple for further tweaking/saving
+    plt.subplots_adjust(bottom=0.28, top=0.88)
+    return fig, ax_m
