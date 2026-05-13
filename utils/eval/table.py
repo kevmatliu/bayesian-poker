@@ -69,6 +69,21 @@ def board_at_street_end(hand: Hand, street: str) -> str:
     return sts[-1].community_cards or ""  # concatenated two-char cards (e.g. ``AhKdQc``)
 
 
+def player_alive_at_street_end(hand: Hand, street: str, player: str) -> bool:
+    """
+    True iff ``player`` has not folded by the **last** snapshot on ``street``.
+
+    Uses the same end-of-street convention as :func:`board_at_street_end` /
+    :func:`betting_history_on_street` (final ``State.players_in_hand`` on that street).
+    If the hand never reached ``street`` (no states), returns ``False``.
+    """
+    sts = hand.states.get(street) or []
+    if not sts:
+        return False
+    alive_map = {name: bool(ok) for name, ok in (sts[-1].players_in_hand or [])}
+    return bool(alive_map.get(player, False))
+
+
 def session_phh_files(session_dir: Path) -> List[Path]:
     """Same ordering as ``Session.parse()``."""
 

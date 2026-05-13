@@ -2,8 +2,11 @@
 """Learn per-player ``theta`` vectors (preflop + postflop) from frozen global ``beta``.
 
 Loads ``artifacts/global_priors.json`` (or any path) produced by ``train.py``,
-builds EM bundles per target player via :mod:`runners.common`, and runs
-:func:`utils.em.preflop.run_preflop_em` plus :func:`utils.em.postflop.run_postflop_theta_em`.
+builds latent bundles per target player via :mod:`runners.common`, and fits
+``theta_pre`` / ``theta_post`` with either EM (:func:`utils.em.preflop.run_preflop_em`,
+:func:`utils.em.postflop.run_postflop_theta_em`) or marginal Newton
+(:func:`utils.newton.preflop.run_preflop_newton`,
+:func:`utils.newton.postflop.run_postflop_theta_newton`) when ``--newton`` is set.
 Supports bilateral ``--em-pair`` mode (each player uses only the other as observer).
 """
 
@@ -33,6 +36,7 @@ from .common import (
 )
 from utils.em import run_postflop_theta_em, run_preflop_em
 from utils.em.common import POSTFLOP_M_BATCH_SIZE, PREFLOP_M_BATCH_SIZE
+from utils.newton import run_postflop_theta_newton, run_preflop_newton
 
 LOG = logging.getLogger("find_theta")
 
@@ -182,6 +186,48 @@ def _mirror_em_history_jsonl_record(rec: Mapping[str, Any]) -> None:
             rec.get("outer_wall_s"),
         )
         return
+    if kind == "preflop_newton_iter_start":
+        LOG.info(
+            "Theta history jsonl | preflop_newton_iter_start | target=%s | newton_iter=%s/%s | n_bundles=%s",
+            tgt,
+            int(rec.get("newton_iter", 0)) + 1,
+            rec.get("max_newton_iters"),
+            rec.get("n_bundles"),
+        )
+        return
+    if kind == "preflop_newton_step":
+        LOG.info(
+            "Theta history jsonl | preflop_newton_step | target=%s | iter=%s | theta_pre=%s | "
+            "|grad|=%s | map_obj=%s | alpha=%s",
+            tgt,
+            rec.get("newton_iter"),
+            rec.get("theta_pre"),
+            rec.get("grad_norm"),
+            rec.get("map_objective"),
+            rec.get("line_search_alpha"),
+        )
+        return
+    if kind == "postflop_newton_iter_start":
+        LOG.info(
+            "Theta history jsonl | postflop_newton_iter_start | target=%s | newton_iter=%s/%s | n_hands=%s",
+            tgt,
+            int(rec.get("newton_iter", 0)) + 1,
+            rec.get("max_newton_iters"),
+            rec.get("n_hands"),
+        )
+        return
+    if kind == "postflop_newton_step":
+        LOG.info(
+            "Theta history jsonl | postflop_newton_step | target=%s | iter=%s | theta_post=%s | "
+            "|grad|=%s | map_obj=%s | alpha=%s",
+            tgt,
+            rec.get("newton_iter"),
+            rec.get("theta_post"),
+            rec.get("grad_norm"),
+            rec.get("map_objective"),
+            rec.get("line_search_alpha"),
+        )
+        return
 
     LOG.debug("EM history jsonl | %s | %s", kind, json.dumps(rec, default=str))
 
@@ -256,9 +302,25 @@ def _log_postflop_em_hand_composition(target: str, metas: List[Dict[str, Any]]) 
 
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
-        description="Run EM to infer theta_pre and theta_post per player using JSON global priors.",
+        description="Infer theta_pre and theta_post per player using JSON global priors (EM or Newton).",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
+    opt_method = p.add_mutually_exclusive_group()
+    opt_method.add_argument(
+        "--em",
+        dest="theta_method",
+        action="store_const",
+        const="em",
+        help="Use EM for theta (default when neither flag is passed).",
+    )
+    opt_method.add_argument(
+        "--newton",
+        dest="theta_method",
+        action="store_const",
+        const="newton",
+        help="Use Newton on marginal observed-data log-likelihood (MAP, same L2 penalty as EM).",
+    )
+    p.set_defaults(theta_method="em")
     p.add_argument(
         "inputs",
         nargs="+",
@@ -311,8 +373,11 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--out",
         type=Path,
-        default=Path("artifacts/player_thetas.json"),
-        help="Output JSON path.",
+        default=None,
+        help=(
+            "Output JSON path. When omitted: artifacts/player_thetas_em.json if using EM (default or --em), "
+            "artifacts/player_thetas_newton.json if using --newton."
+        ),
     )
     p.add_argument(
         "--warm-start",
@@ -348,9 +413,10 @@ def build_parser() -> argparse.ArgumentParser:
         type=Path,
         default=None,
         help=(
-            "Directory for EM jsonl traces (one file per target player or bilateral pair). "
-            "Each line is flushed immediately; the same record is echoed to the logger with "
-            "prefix 'EM history jsonl' (per-bundle e_step at DEBUG). Default: omit = no jsonl file."
+            "Directory for jsonl traces (one file per target player or bilateral pair). "
+            "Each line is flushed immediately; the same record is echoed to the logger. "
+            "EM runs emit kinds like preflop_e_step; Newton runs emit preflop_newton_step / "
+            "postflop_newton_step. Default: omit = no jsonl file."
         ),
     )
     p.add_argument(
@@ -398,6 +464,7 @@ def learn_player_thetas(
     max_sessions: Optional[int] = None,
     players: Optional[Sequence[str]] = None,
     warm_start_path: Optional[Path] = None,
+    theta_method: str = "em",
     preflop_floor: float = 0.01,
     preflop_em_iters: int = 5,
     preflop_m_steps: int = 100,
@@ -416,17 +483,21 @@ def learn_player_thetas(
     postflop_require_observer: Optional[str] = None,
     em_pair: Optional[Tuple[str, str]] = None,
 ) -> Dict[str, Any]:
-    """Run preflop + postflop EM for each requested player; return a JSON-serializable report.
+    """Run preflop + postflop θ optimization for each requested player; return a JSON-serializable report.
 
-    Steps per player: gather preflop bundles (observer dead cards → 169 prior),
-    :func:`run_preflop_em`; gather postflop combo bundles, :func:`run_postflop_theta_em`;
-    merge results into ``players_out[player]`` with ``theta_pre``, ``theta_post``,
-    diagnostics, and optional EM jsonl via ``em_history_dir``.
+    Steps per player: gather preflop bundles (observer dead cards → 169 prior), fit ``theta_pre``;
+    gather postflop combo bundles, fit ``theta_post``; merge into ``players_out[player]``.
+    Use ``theta_method='em'`` or ``'newton'`` to pick :func:`run_preflop_em` vs :func:`run_preflop_newton`
+    (and postflop analogues). ``preflop_em_iters`` / ``postflop_em_iters`` double as Newton iteration caps
+    when ``theta_method=='newton'``.
 
     ``warm_start_path`` may seed ``theta`` from a prior ``player_thetas.json``.
     """
     if global_priors_path is None:
         raise ValueError("global_priors_path is required")
+    tm = str(theta_method).lower()
+    if tm not in ("em", "newton"):
+        raise ValueError(f"theta_method must be 'em' or 'newton', got {theta_method!r}")
     beta_preflop, beta_facing, beta_no_bet = load_global_priors(global_priors_path)
     if refs is None:
         if not inputs:
@@ -459,9 +530,9 @@ def learn_player_thetas(
     )
     if em_hist_root is not None:
         LOG.info(
-            "EM history jsonl | enabled | directory=%s | one .jsonl per target player; "
-            "each written record is echoed below with prefix 'EM history jsonl' "
-            "(per-hand e_step details at DEBUG)",
+            "Theta fit history jsonl | enabled | method=%s | directory=%s | one .jsonl per target player; "
+            "each written record is echoed below (per-bundle e_step details at DEBUG for EM)",
+            tm,
             em_hist_root,
         )
 
@@ -545,13 +616,13 @@ def learn_player_thetas(
 
         if em_log_f is not None:
             LOG.info(
-                "EM history jsonl | file=%s | line-buffered flushes; console mirror for each record",
+                "Theta fit history jsonl | file=%s | line-buffered flushes; console mirror for each record",
                 em_log_path.resolve(),
             )
             _em_write(
                 {
                     "kind": "em_player_segment_start",
-                    "note": "Beginning preflop then postflop EM for this player",
+                    "note": f"Beginning preflop then postflop θ fit ({tm}) for this player",
                 }
             )
 
@@ -564,41 +635,56 @@ def learn_player_thetas(
 
         # Preflop EM
         if bundles:
+            fit_label = "Newton" if tm == "newton" else "EM"
             LOG.info(
-                "Player %s | starting preflop EM | bundles=%d | outer_iters=%d | m_steps=%d | m_batch_size=%d",
+                "Player %s | starting preflop %s | bundles=%d | outer_or_newton_iters=%d | m_steps=%d | m_batch_size=%d",
                 player,
+                fit_label,
                 len(bundles),
                 preflop_em_iters,
                 preflop_m_steps,
                 preflop_m_batch_size,
             )
             t0 = time.perf_counter()
-            theta_pre, _ = run_preflop_em(
-                bundles,
-                prior_floor=preflop_floor,
-                beta_preflop=beta_preflop,
-                theta_init=theta_pre_init,
-                num_em_iters=preflop_em_iters,
-                m_l2=preflop_m_l2,
-                m_lr=preflop_m_lr,
-                m_steps=preflop_m_steps,
-                m_batch_size=preflop_m_batch_size,
-                history_hook=_em_write if em_log_f is not None else None,
-                bundle_meta=bundle_metas,
-            )
+            if tm == "newton":
+                theta_pre, _ = run_preflop_newton(
+                    bundles,
+                    prior_floor=preflop_floor,
+                    beta_preflop=beta_preflop,
+                    theta_init=theta_pre_init,
+                    max_newton_iters=preflop_em_iters,
+                    m_l2=preflop_m_l2,
+                    history_hook=_em_write if em_log_f is not None else None,
+                    bundle_meta=bundle_metas,
+                )
+            else:
+                theta_pre, _ = run_preflop_em(
+                    bundles,
+                    prior_floor=preflop_floor,
+                    beta_preflop=beta_preflop,
+                    theta_init=theta_pre_init,
+                    num_em_iters=preflop_em_iters,
+                    m_l2=preflop_m_l2,
+                    m_lr=preflop_m_lr,
+                    m_steps=preflop_m_steps,
+                    m_batch_size=preflop_m_batch_size,
+                    history_hook=_em_write if em_log_f is not None else None,
+                    bundle_meta=bundle_metas,
+                )
             theta_pre_list = [float(x) for x in theta_pre]
             if em_log_f is not None:
                 em_log_f.flush()
             LOG.info(
-                "Player %s | preflop EM returned in %.2fs | collecting postflop bundles "
+                "Player %s | preflop %s returned in %.2fs | collecting postflop bundles "
                 "(scanning %d hand refs; only refs where target is seated are candidates)…",
                 player,
+                fit_label,
                 time.perf_counter() - t0,
                 len(refs),
             )
         else:
             theta_pre_list = [0.0, 0.0, 0.0]
-            LOG.warning("Player %s: no preflop EM bundles; theta_pre set to zeros.", player)
+            LOG.warning("Player %s: no preflop bundles; theta_pre set to zeros.", player)
 
         t_pf0 = time.perf_counter()
         postflop_bundles, postflop_bundle_metas = gather_postflop_bundles_for_target_player(
@@ -618,36 +704,52 @@ def learn_player_thetas(
         _log_postflop_em_hand_composition(player, postflop_bundle_metas)
 
         if postflop_bundles:
+            fit_label = "Newton" if tm == "newton" else "EM"
             LOG.info(
-                "Player %s | starting postflop EM | bundles=%d | outer_iters=%d | m_steps=%d | m_batch_size=%d",
+                "Player %s | starting postflop %s | bundles=%d | outer_or_newton_iters=%d | m_steps=%d | m_batch_size=%d",
                 player,
+                fit_label,
                 len(postflop_bundles),
                 postflop_em_iters,
                 postflop_m_steps,
                 postflop_m_batch_size,
             )
-            theta_post, _ = run_postflop_theta_em(
-                postflop_bundles,
-                prior_floor=postflop_floor,
-                theta_init=theta_post_init,
-                beta_facing=beta_facing,
-                beta_no_bet=beta_no_bet,
-                num_em_iters=postflop_em_iters,
-                m_lr=postflop_m_lr,
-                m_steps=postflop_m_steps,
-                m_l2=postflop_m_l2,
-                m_batch_size=postflop_m_batch_size,
-                clip=postflop_clip,
-                history_hook=_em_write if em_log_f is not None else None,
-                hand_meta=postflop_bundle_metas,
-            )
+            if tm == "newton":
+                theta_post, _ = run_postflop_theta_newton(
+                    postflop_bundles,
+                    prior_floor=postflop_floor,
+                    theta_init=theta_post_init,
+                    beta_facing=beta_facing,
+                    beta_no_bet=beta_no_bet,
+                    max_newton_iters=postflop_em_iters,
+                    m_l2=postflop_m_l2,
+                    clip=postflop_clip,
+                    history_hook=_em_write if em_log_f is not None else None,
+                    hand_meta=postflop_bundle_metas,
+                )
+            else:
+                theta_post, _ = run_postflop_theta_em(
+                    postflop_bundles,
+                    prior_floor=postflop_floor,
+                    theta_init=theta_post_init,
+                    beta_facing=beta_facing,
+                    beta_no_bet=beta_no_bet,
+                    num_em_iters=postflop_em_iters,
+                    m_lr=postflop_m_lr,
+                    m_steps=postflop_m_steps,
+                    m_l2=postflop_m_l2,
+                    m_batch_size=postflop_m_batch_size,
+                    clip=postflop_clip,
+                    history_hook=_em_write if em_log_f is not None else None,
+                    hand_meta=postflop_bundle_metas,
+                )
             theta_post_list = [float(x) for x in theta_post]
             if em_log_f is not None:
                 em_log_f.flush()
-            LOG.info("Player %s | postflop EM finished", player)
+            LOG.info("Player %s | postflop %s finished", player, fit_label)
         else:
             theta_post_list = [0.0, 0.0, 0.0]
-            LOG.warning("Player %s: no postflop EM bundles; theta_post set to zeros.", player)
+            LOG.warning("Player %s: no postflop bundles; theta_post set to zeros.", player)
 
         pair_label = None
         if cur_restrict is not None and len(cur_restrict) == 1:
@@ -670,13 +772,33 @@ def learn_player_thetas(
         }
 
         if em_log_f is not None:
-            _em_write({"kind": "em_player_segment_end", "note": "Finished EM for this player"})
+            _em_write({"kind": "em_player_segment_end", "note": f"Finished θ fit ({tm}) for this player"})
             em_log_f.close()
+
+    if tm == "newton":
+        notes: Dict[str, str] = {
+            "preflop_newton": (
+                "theta_pre from Newton on marginal observed-data log-likelihood (MAP, same L2 as EM); "
+                "``preflop_em_iters`` caps Newton iterations."
+            ),
+            "postflop_newton": (
+                "theta_post from the same Newton objective; ``postflop_em_iters`` caps iterations."
+            ),
+        }
+    else:
+        notes = {
+            "preflop_em": "theta_pre tilts population logits from train.py beta_preflop.",
+            "postflop_em": (
+                "theta_post tilts population logits from train.py beta_facing / beta_no_bet; "
+                "each bundle uses initial_class_prior→1,326 (observer dead cards) like preflop EM."
+            ),
+        }
 
     out: Dict[str, Any] = {
         "schema": "bayesian_poker.player_thetas.v1",
         "global_priors_path": str(Path(global_priors_path).resolve()),
         "hands_used": len(refs),
+        "theta_method": tm,
         "players": players_out,
         "player_identity": {
             "theta_key": "Exact player name string from parsed .phh files (case-sensitive).",
@@ -685,17 +807,11 @@ def learn_player_thetas(
                 "a roster name that only appears in session A never receives updates from session B."
             ),
             "isolation": (
-                "Each entry in ``players`` is fit in a separate EM loop. Updating one name "
+                "Each entry in ``players`` is fit in a separate loop. Updating one name "
                 "does not change tensors or JSON fields for any other name."
             ),
         },
-        "notes": {
-            "preflop_em": "theta_pre tilts population logits from train.py beta_preflop.",
-            "postflop_em": (
-                "theta_post tilts population logits from train.py beta_facing / beta_no_bet; "
-                "each bundle uses initial_class_prior→1,326 (observer dead cards) like preflop EM."
-            ),
-        },
+        "notes": notes,
     }
     if em_pair is not None:
         out["em_scope"] = {
@@ -714,6 +830,13 @@ def learn_player_thetas(
 def main(argv: List[str] | None = None) -> int:
     """CLI: parse flags, run :func:`learn_player_thetas`, write ``--out`` JSON."""
     args = build_parser().parse_args(argv)
+    tm = str(args.theta_method).lower()
+    out_path = args.out
+    if out_path is None:
+        if tm == "newton":
+            out_path = Path("artifacts/player_thetas_newton.json")
+        else:
+            out_path = Path("artifacts/player_thetas_em.json")
     logging.basicConfig(
         level=getattr(logging, args.log_level),
         format="%(asctime)s | %(levelname)-7s | %(message)s",
@@ -747,6 +870,7 @@ def main(argv: List[str] | None = None) -> int:
         max_sessions=args.max_sessions,
         players=args.players,
         warm_start_path=args.warm_start,
+        theta_method=args.theta_method,
         preflop_floor=args.preflop_floor,
         preflop_em_iters=args.preflop_em_iters,
         preflop_m_steps=args.preflop_m_steps,
@@ -766,8 +890,8 @@ def main(argv: List[str] | None = None) -> int:
         em_pair=tuple(args.em_pair) if args.em_pair is not None else None,
     )
 
-    dump_json(args.out, payload)
-    LOG.info("Wrote %s", Path(args.out).resolve())
+    dump_json(out_path, payload)
+    LOG.info("Wrote %s", Path(out_path).resolve())
     return 0
 
 

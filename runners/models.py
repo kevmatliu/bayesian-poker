@@ -18,6 +18,7 @@ class EMPreflopRunConfig:
     m_lr: float = 0.005
     m_l2: float = 0.25
     m_batch_size: int = PREFLOP_M_BATCH_SIZE
+    theta_method: str = "em"  # "em" | "newton"
 
 
 @dataclass(frozen=True)
@@ -28,6 +29,7 @@ class EMPreflopResult:
     m_step_steps: int = 0
     m_learning_rate: float = 0.0
     m_l2: float = 0.0
+    theta_method: str = "em"
     note: str = ""
 
 
@@ -40,6 +42,7 @@ class EMPostflopRunConfig:
     m_l2: float = 0.25
     m_batch_size: int = POSTFLOP_M_BATCH_SIZE
     prior_floor: float = 1e-6
+    theta_method: str = "em"
 
 
 @dataclass(frozen=True)
@@ -51,6 +54,7 @@ class EMPostflopResult:
     m_learning_rate: float = 0.0
     m_l2: float = 0.0
     hands_with_target_cards_per_pair: Dict[str, int] = field(default_factory=dict)
+    theta_method: str = "em"
     note: str = ""
 
 

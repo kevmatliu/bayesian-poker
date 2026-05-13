@@ -10,7 +10,7 @@ import numpy as np
 import pandas as pd
 
 from utils.eval.brier import brier_postflop1326, brier_preflop_from_combo1326
-from utils.eval.logutil import eval_log
+from utils.eval.common import eval_log
 from utils.eval.strength import (
     expected_made_and_draw_mc,
     made_percentile_calibration_stats,
@@ -20,6 +20,7 @@ from utils.eval.table import (
     betting_history_on_street,
     betting_history_up_to_street_end,
     board_at_street_end,
+    player_alive_at_street_end,
     seat_columns,
 )
 from utils.filter import combo_key
@@ -87,6 +88,9 @@ def enrich_online_range_dataframe(
     ``betting_this_street`` (action on the row's street, from the final in-street snapshot),
     both human-readable strings for plotting / notebooks.
 
+    Adds ``target_still_in_hand`` — whether ``target`` is still in the pot at the end of
+    the row's ``street`` (``False`` when the ``.phh`` is missing or the street was not reached).
+
     With ``verbose=True``, prints progress every ``progress_every`` rows (minimum 1).
     """
     meta_columns_present(df)                                                                     # validate schema early
@@ -116,6 +120,7 @@ def enrich_online_range_dataframe(
     seats: list[list[str]] = []                                                                  # parallel column buffer: six seat holes
     bet_prior: list[str] = []                                                                    # parallel column buffer: prior betting text
     bet_this: list[str] = []                                                                     # parallel column buffer: in-street betting text
+    still_in: list[bool] = []                                                                    # target alive at end of row street (for eval filtering)
 
     for i, (_, row) in enumerate(out.iterrows(), start=1):                                       # iterate rows with 1-based human index
         if verbose and (i == 1 or i == n or i % step == 0):                                      # periodic progress
@@ -129,6 +134,7 @@ def enrich_online_range_dataframe(
             seats.append([""] * 6)
             bet_prior.append("")
             bet_this.append("")
+            still_in.append(False)                                                               # unknown hand → exclude from in-hand eval
             continue                                                                             # skip expensive parsing for missing files
         if st == "pre-flop":                                                                     # no public board yet
             comm.append("")                                                                      # convention: empty board string preflop
@@ -139,6 +145,7 @@ def enrich_online_range_dataframe(
         seats.append([sc.get(f"p{i}", "") for i in range(1, 7)])                                 # fixed p1..p6 order
         bet_prior.append(betting_history_up_to_street_end(hand, st))                             # completed prior action narrative
         bet_this.append(betting_history_on_street(hand, st))                                     # in-street action narrative
+        still_in.append(player_alive_at_street_end(hand, st, tgt))                               # fold filtering for range metrics
 
     out["community_cards"] = comm                                                                # attach new column
     out["target_hole_cards"] = holes                                                             # attach new column
@@ -146,6 +153,7 @@ def enrich_online_range_dataframe(
         out[f"p{i}"] = [s[i - 1] for s in seats]                                                 # i-th seat across rows
     out["betting_prior_streets"] = bet_prior                                                     # attach prior betting text
     out["betting_this_street"] = bet_this                                                        # attach in-street betting text
+    out["target_still_in_hand"] = still_in                                                       # attach in-hand flag for downstream metrics
     eval_log(
         verbose,
         f"enrich_online_range_dataframe: done ({len(cache)} unique session/hand hands cached)",  # cache stats

@@ -1,21 +1,6 @@
 #!/usr/bin/env bash
-# Train per-player theta (``python -m runners.find_theta``) on sessions listed in sessions_theta.txt.
-# Uses artifacts/global_priors.json. Default output: artifacts/player_thetas.json (see find_theta --out).
+# Default entrypoint: same as command_theta_em.sh (EM → artifacts/player_thetas_em.json).
 # Usage: ./command_theta.sh [PLURIBUS_ROOT] [SESSIONS_FILE] [-- extra python args...]
 set -euo pipefail
-ROOT="${1:-pluribus}"
-SESSIONS_FILE="${2:-sessions_theta.txt}"
-if (( $# >= 2 )); then shift 2
-elif (( $# >= 1 )); then shift 1
-fi
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-cd "$SCRIPT_DIR"
-exec .venv/bin/python -m runners.find_theta "$ROOT" \
-  --sessions-file "$SESSIONS_FILE" \
-  --players MrBlue Bill Pluribus \
-  --global-priors artifacts/global_priors.json \
-  --preflop-m-lr 2e-3 \
-  --postflop-m-lr 2e-3 \
-  --preflop-m-batch-size 0 \
-  --postflop-m-batch-size 0 \
-  "$@"
+exec "$SCRIPT_DIR/command_theta_em.sh" "$@"

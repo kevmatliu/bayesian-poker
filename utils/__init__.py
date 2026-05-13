@@ -9,6 +9,7 @@ from utils.em import (
     run_postflop_theta_em,
     run_preflop_em,
 )
+from utils.newton import run_postflop_theta_newton, run_preflop_newton
 from utils.tendency import ActionPrior, InferencePhase, TendencyTheta
 
 __all__ = [
@@ -21,5 +22,7 @@ __all__ = [
     "TendencyTheta",
     "normalize_log_weights",
     "run_postflop_theta_em",
+    "run_postflop_theta_newton",
     "run_preflop_em",
+    "run_preflop_newton",
 ]

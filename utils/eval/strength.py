@@ -6,7 +6,7 @@ from typing import List, Mapping, Optional, Tuple, Union
 
 import numpy as np
 
-from utils.eval.logutil import eval_log
+from utils.eval.common import eval_log
 from utils.filter.postflop import parse_combo_key
 from utils.parse import Card, parse_cards
 from utils.strength.fast_eval import card_to_index, made_percentile_array

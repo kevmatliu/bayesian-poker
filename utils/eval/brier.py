@@ -8,7 +8,7 @@ from typing import Dict, Mapping, MutableMapping, Sequence
 import numpy as np
 
 from utils.filter.postflop import parse_combo_key
-from utils.eval.logutil import eval_log
+from utils.eval.common import eval_log
 from utils.strength.preflop import all_169_classes, get_equivalence_class
 
 

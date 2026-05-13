@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 from utils.em import PreflopEMDecision, PreflopEMHandBundle, run_postflop_theta_em, run_preflop_em
+from utils.newton import run_postflop_theta_newton, run_preflop_newton
 from utils.filter import ComboRangeFilter, PreflopRangeFilter, all_combo_keys
 from utils.filter.common import initial_class_prior, normalize
 from utils.action.postflop import PostflopActionModel
@@ -130,26 +131,40 @@ def _run_preflop_em_per_pair(
     for idx, ((observer, target), bundles) in enumerate(pairs_non_empty, start=1):
         pair_label = f"{observer}|{target}"
         n_decisions = sum(len(b.decisions) for b in bundles)
+        tm = str(em_cfg.theta_method).lower()
+        if tm not in ("em", "newton"):
+            raise ValueError(f"EMPreflopRunConfig.theta_method must be 'em' or 'newton', got {em_cfg.theta_method!r}")
+        label = "Newton" if tm == "newton" else "EM"
         LOG.info(
-            "EM pair %d/%d: %s (%d hands / bundles, %d target preflop decisions)",
+            "Preflop %s pair %d/%d: %s (%d hands / bundles, %d target preflop decisions)",
+            label,
             idx,
             total_pairs,
             pair_label,
             len(bundles),
             n_decisions,
         )
-        theta, _ = run_preflop_em(
-            bundles,
-            prior_floor=PREFLOP_PRIOR_FLOOR,
-            num_em_iters=em_cfg.outer_iters,
-            m_l2=em_cfg.m_l2,
-            m_lr=em_cfg.m_lr,
-            m_steps=em_cfg.m_steps,
-            m_batch_size=em_cfg.m_batch_size,
-        )
+        if tm == "newton":
+            theta, _ = run_preflop_newton(
+                bundles,
+                prior_floor=PREFLOP_PRIOR_FLOOR,
+                max_newton_iters=em_cfg.outer_iters,
+                m_l2=em_cfg.m_l2,
+            )
+        else:
+            theta, _ = run_preflop_em(
+                bundles,
+                prior_floor=PREFLOP_PRIOR_FLOOR,
+                num_em_iters=em_cfg.outer_iters,
+                m_l2=em_cfg.m_l2,
+                m_lr=em_cfg.m_lr,
+                m_steps=em_cfg.m_steps,
+                m_batch_size=em_cfg.m_batch_size,
+            )
         out[pair_label] = [float(x) for x in theta]
         LOG.info(
-            "EM finished %s: theta_pre [fold, call, raise] = [%.6f, %.6f, %.6f]",
+            "Preflop %s finished %s: theta_pre [fold, call, raise] = [%.6f, %.6f, %.6f]",
+            label,
             pair_label,
             out[pair_label][0],
             out[pair_label][1],
@@ -169,26 +184,40 @@ def _run_postflop_em_per_pair(
     for idx, ((observer, target), bundles_by_hand) in enumerate(nonempty, start=1):
         pair_label = f"{observer}|{target}"
         n_hands = len(bundles_by_hand)
+        tm = str(pf_cfg.theta_method).lower()
+        if tm not in ("em", "newton"):
+            raise ValueError(f"EMPostflopRunConfig.theta_method must be 'em' or 'newton', got {pf_cfg.theta_method!r}")
+        label = "Newton" if tm == "newton" else "EM"
         LOG.info(
-            "Post-flop EM pair %d/%d: %s (%d hands with target postflop actions)",
+            "Post-flop %s pair %d/%d: %s (%d hands with target postflop actions)",
+            label,
             idx,
             total_pairs,
             pair_label,
             n_hands,
         )
-        theta, _ = run_postflop_theta_em(
-            bundles_by_hand,
-            prior_floor=pf_cfg.prior_floor,
-            num_em_iters=pf_cfg.outer_iters,
-            m_lr=pf_cfg.m_lr,
-            m_steps=pf_cfg.m_steps,
-            m_l2=pf_cfg.m_l2,
-            m_batch_size=pf_cfg.m_batch_size,
-        )
+        if tm == "newton":
+            theta, _ = run_postflop_theta_newton(
+                bundles_by_hand,
+                prior_floor=pf_cfg.prior_floor,
+                max_newton_iters=pf_cfg.outer_iters,
+                m_l2=pf_cfg.m_l2,
+            )
+        else:
+            theta, _ = run_postflop_theta_em(
+                bundles_by_hand,
+                prior_floor=pf_cfg.prior_floor,
+                num_em_iters=pf_cfg.outer_iters,
+                m_lr=pf_cfg.m_lr,
+                m_steps=pf_cfg.m_steps,
+                m_l2=pf_cfg.m_l2,
+                m_batch_size=pf_cfg.m_batch_size,
+            )
         theta_out[pair_label] = [float(x) for x in theta]
         counts[pair_label] = n_hands
         LOG.info(
-            "Post-flop EM finished %s: theta_post [fold, passive, agg] = [%.6f, %.6f, %.6f]",
+            "Post-flop %s finished %s: theta_post [fold, passive, agg] = [%.6f, %.6f, %.6f]",
+            label,
             pair_label,
             theta_out[pair_label][0],
             theta_out[pair_label][1],
@@ -217,6 +246,7 @@ def _compute_postflop_em_result(
         )
         return EMPostflopResult(
             enabled=True,
+            theta_method=pf_cfg.theta_method,
             note="No post-flop EM data: no target postflop actions or combo prior could not be built.",
         )
 
@@ -233,6 +263,7 @@ def _compute_postflop_em_result(
         m_learning_rate=pf_cfg.m_lr,
         m_l2=pf_cfg.m_l2,
         hands_with_target_cards_per_pair=counts_pf,
+        theta_method=pf_cfg.theta_method,
         note="Learned from hands with target postflop actions; latent combo prior matches preflop EM (initial_class_prior → 1,326).",
     )
 
@@ -596,7 +627,11 @@ def _maybe_preflop_em(
             else "EM requested but no target pre-flop actions were found in the session."
         )
         LOG.warning(note)
-        return theta_by_pair, EMPreflopResult(enabled=True, note=note)
+        return theta_by_pair, EMPreflopResult(
+            enabled=True,
+            theta_method=em_cfg.theta_method,
+            note=note,
+        )
 
     theta_by_pair = _run_preflop_em_per_pair(groups, em_cfg)
     return theta_by_pair, EMPreflopResult(
@@ -606,6 +641,7 @@ def _maybe_preflop_em(
         m_step_steps=em_cfg.m_steps,
         m_learning_rate=em_cfg.m_lr,
         m_l2=em_cfg.m_l2,
+        theta_method=em_cfg.theta_method,
         note="theta_pre replaces --phi for the action prior when EM is enabled.",
     )
 

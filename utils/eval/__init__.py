@@ -1,6 +1,49 @@
 """Evaluation helpers: range calibration (Brier) and strength distributions."""
 
-from utils.eval.logutil import eval_log
+from utils.eval.common import (
+    default_global_priors_eval_session_paths,
+    em_and_online_refs,
+    eval_log,
+    find_repo_root,
+    resolve_session_eval_path,
+    resolve_session_filter_path,
+    resolve_session_theta_path,
+    resolve_session_train_path,
+)
+from utils.eval.global_priors_evaluation_helpers import (
+    GlobalPriorsSupervisedBundle,
+    confusion_matrix_counts,
+    default_supervised_cache_path,
+    empirical_marginal,
+    global_priors_three_head_predictions,
+    load_or_build_global_priors_supervised,
+    mean_brier,
+    metric_rows_three_heads,
+    nll,
+    predict_probs,
+    remap_no_bet_labels,
+    row_normalise,
+    softmax_rows,
+    summarize_metric_rows,
+    top1_accuracy,
+)
+from utils.eval.player_thetas_evaluation_helpers import (
+    build_player_prediction_dict,
+    flip_rate,
+    heldout_gradient_norm_components,
+    load_global_betas,
+    load_player_thetas,
+    online_summary_rows,
+    realised_shifts,
+)
+from utils.eval.range_evaluation_helpers import (
+    compute_all_posterior_results,
+    default_observer_map,
+    em_and_online_hand_refs,
+    ranks_from_results,
+    run_filter_sessions_range_evaluation,
+    true_hand_nll,
+)
 
 from utils.eval.brier import (
     brier_postflop1326,
@@ -38,51 +81,10 @@ from utils.eval.table import (
     format_betting_action,
     format_betting_history_serial,
     hand_number_from_path,
+    player_alive_at_street_end,
     seat_columns,
     session_phh_files,
 )
-
-from utils.eval.repo_paths import (
-    default_global_priors_eval_session_paths,
-    find_repo_root,
-    resolve_session_filter_path,
-    resolve_session_theta_path,
-    resolve_session_train_path,
-)
-from utils.eval.global_priors_supervised import (
-    GlobalPriorsSupervisedBundle,
-    default_supervised_cache_path,
-    load_or_build_global_priors_supervised,
-)
-from utils.eval.action_heads import (
-    confusion_matrix_counts,
-    empirical_marginal,
-    global_priors_three_head_predictions,
-    mean_brier,
-    metric_rows_three_heads,
-    nll,
-    predict_probs,
-    remap_no_bet_labels,
-    row_normalise,
-    softmax_rows,
-    summarize_metric_rows,
-    top1_accuracy,
-)
-from utils.eval.player_thetas_eval import (
-    build_player_prediction_dict,
-    em_and_online_refs,
-    load_global_betas,
-    load_player_thetas,
-    online_summary_rows,
-)
-from utils.eval.preflop_range_posterior_eval import (
-    compute_all_posterior_results,
-    default_observer_map,
-    em_and_online_hand_refs,
-    ranks_from_results,
-    true_hand_nll,
-)
-from utils.eval.filter_sessions_range_csv import run_filter_sessions_range_evaluation
 
 __all__ = [
     "MADE_STRENGTH_PCT_COLUMN_PREFIX",
@@ -115,6 +117,7 @@ __all__ = [
     "load_hand_pluribus",
     "meta_columns_present",
     "multiclass_brier",
+    "player_alive_at_street_end",
     "seat_columns",
     "session_phh_files",
     "GlobalPriorsSupervisedBundle",
@@ -128,7 +131,9 @@ __all__ = [
     "em_and_online_refs",
     "empirical_marginal",
     "find_repo_root",
+    "flip_rate",
     "global_priors_three_head_predictions",
+    "heldout_gradient_norm_components",
     "load_global_betas",
     "load_or_build_global_priors_supervised",
     "load_player_thetas",
@@ -138,7 +143,9 @@ __all__ = [
     "online_summary_rows",
     "predict_probs",
     "ranks_from_results",
+    "realised_shifts",
     "remap_no_bet_labels",
+    "resolve_session_eval_path",
     "resolve_session_filter_path",
     "resolve_session_theta_path",
     "resolve_session_train_path",

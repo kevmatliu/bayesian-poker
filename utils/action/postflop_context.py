@@ -110,6 +110,8 @@ class PostflopFeatures:
 def _rich_block(features: PostflopFeatures) -> np.ndarray:
     """Extracting the board-relative features"""
     arr = features.rich
+    if arr is None:
+        return np.zeros(RICH_FEAT_DIM, dtype=float)
     a = np.asarray(arr, dtype=float)
     if a.shape == (RICH_FEAT_DIM,):
         return a
