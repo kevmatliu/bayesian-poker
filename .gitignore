@@ -1,4 +1,7 @@
 **/__pycache__/
+.venv/
+.pytest_cache/
+
 artifacts/filter_sessions_process.log
 artifacts/filter_sessions_range_history_enriched.csv
 artifacts/filter_sessions_range_history_newton.csv
@@ -6,4 +9,4 @@ artifacts/filter_sessions_process_em.log
 artifacts/filter_sessions_range_history_enriched_em.csv
 artifacts/filter_sessions_range_history_em.csv
 
-.venv/
+stale/

@@ -1,61 +1,75 @@
 # Bayesian Poker
 
-Population-level action baselines and per-player **tendency** parameters inferred from Pluribus-style `.phh` hand histories.
+Using the Pluribus dataset, we conducted Bayesian range filtering and determined latent player tendencies using EM and Newton. The model is comprised of the following:
+- Population-level action baselines (`beta`), trained using multinomial logistic regression
+- Per-player tendency tilts for each action (`theta`) from the global population-level baselines, learned via EM or Newton's method
+- Range filter `R_t`, a 169-dimensional probability vector on the canonical hand equivalence classes in the preflop regime -> explodes into 1326-dimensional probability vector in postflop for each combo, updated via the predicted actions following `beta` and `theta`.
 
-## What the model is
+## `utils/`
 
-1. **Global priors (`beta`)** — Multinomial logistic regression over engineered features:
-   - **Preflop**: 169 abstract hand classes × table state (position, SPR bucket, facing bet, etc.).
-   - **Postflop**: Two heads — **facing a bet** (fold / call / raise) and **no facing bet** (call vs raise only). Features combine made/draw strength, pot geometry, position, board texture, rich per-combo categoricals (Method A), and optional Monte Carlo rollout equity on the flop (Method E).
+| Module | Role |
+|--------|------|
+| `parse.py` | `.phh` → `Hand` (states, actions, hole cards). |
+| `prior/` | Preflop/postflop feature keys, `*Prior` models, shared SGD training (`training.py`). |
+| `em/` | Preflop/postflop E-step / M-step over hand classes or combos (`common.py` shared bits). |
+| `newton/` | Marginal log-likelihood + L2 MAP Newton updates for `theta` (preflop/postflop + shared helpers). |
+| `action/` | Action-phase tagging, preflop/postflop action models and context builders; softmax / utility vectors. |
+| `strength/` | Preflop equivalence classes; determining postflop strength and `fast_eval` tables. |
+| `filter/` | Range narrowing (preflop classes, postflop combos) against priors + thetas. |
+| `postflop_runner_bridge.py` | From `Hand`/`State` to features, strength cache, EM bundles. |
+| `tendency.py` | `TendencyTheta`, `ActionPrior`, `InferencePhase` — shared types wiring priors + tilts. |
+| `eval/` | Helpers for notebooks: global priors / player thetas / ranges, Brier, tables, plots, online CSV. |
 
-2. **Player or session tilt (`theta`)** — A 3-vector that tilts log-probabilities toward actions whose **behavior vectors** deviate from the population baseline expectation. Same mathematical idea preflop (`theta_pre`) and postflop (`theta_post`).
+## `artifacts/` (JSON, CSV)
 
-3. **EM when hole cards are hidden** — For an observer watching a target, the target’s private cards are unknown. The code alternates:
-   - **E-step**: posterior over hand classes (preflop, 169 keys) or concrete combos (postflop, up to 1,326 keys) using the current `theta` and frozen `beta`.
-   - **M-step**: gradient ascent on `theta` with an L2 penalty, using expected sufficient statistics from the E-step.
+| File | Contents |
+|------|----------|
+| `global_priors.json` | Schema `bayesian_poker.global_priors.v1`: trained `beta`, dimensions, column labels, session metadata. |
+| `player_thetas_em.json` | Schema `bayesian_poker.player_thetas.v1`: per-player `theta_pre` / `theta_post` from EM. |
+| `player_thetas_newton.json` | Same schema; thetas from marginal Newton (`runners.find_theta --newton`). |
+| `filter_sessions_range_history.csv` | 1331-column CSV that contains the range for each street and observer-target pair, given a session and hand |
 
-Supervised training of `beta` uses only rows where the actor’s hole cards are known (e.g. labeled Pluribus exports).
+`global_priors_eval_supervised.npz` is a cached supervised eval tensor, not JSON.
 
-## Repository layout
+## `runners/`
 
-| Path | Role |
-|------|------|
-| `runners/` | CLI entrypoints (see below). |
-| `runners/train.py` | Fit `artifacts/global_priors.json` from `.phh` corpora. |
-| `runners/find_theta.py` | Load global priors, build EM bundles, run preflop + postflop EM per player. |
-| `runners/filter_sessions.py` | Batch combo-range filtering over many sessions (`command_filter.sh`). |
-| `runners/execute.py` | Shared preflop/postflop filter + EM helpers used by `filter_sessions`. |
-| `runners/models.py` | Dataclasses / config shared by `execute` and `runners.common`. |
-| `runners/common.py` | Hand loading, session expansion, supervised row collection, EM bundle gathering, splits, and JSON prior helpers. |
-| `utils/parse.py` | `.phh` → `Hand` object (states, actions, hole cards). |
-| `utils/prior/preflop.py` | Preflop `StateKey`, `preflop_feature_vector`, `PreflopPrior`, baseline training. |
-| `utils/prior/postflop.py` | `PostflopFeatures`, `PostflopPrior`, vectorized `action_probs_matrix` (Method D). |
-| `utils/prior/training.py` | Generic multinomial logit SGD for 2- and 3-class baselines. |
-| `utils/em/preflop.py` | Preflop E/M over 169 classes. |
-| `utils/em/postflop.py` | Postflop E/M over combo keys; batched likelihoods. |
-| `utils/postflop_runner_bridge.py` | From `Hand`/`State` to features, strength cache, EM bundles. |
-| `utils/strength/` | Preflop equivalence classes; postflop strength, `fast_eval` tables. |
-| `utils/filter/` | Range narrowing (preflop classes, postflop combos) for priors. |
+| Script | Purpose |
+|--------|---------|
+| `train.py` | Fit `global_priors.json` from labeled rows in `.phh` corpora. |
+| `find_theta.py` | Load global priors, build bundles, infer `theta` per player (`--em` or `--newton`). |
+| `filter_sessions.py` | Batch preflop/postflop range filtering; consumes priors + player thetas JSON. |
+| `execute.py` | Shared filter + EM helpers for `filter_sessions`. |
+| `common.py` | Paths, session expansion, supervised rows, splits, JSON IO helpers. |
+| `models.py` | Dataclasses / config shared by execute and common. |
 
-## Data layout
+CLI help: `python -m runners.<module> -h`.
 
-- **Session folder**: contains numbered `.phh` files (one hand per file).
-- **Pluribus root**: directory whose *children* are session folders (each child holds `.phh` files). `runners.common.expand_data_path` distinguishes a single session from a root.
+## `eval_nbs/`
 
-## Commands
+Jupyter notebooks that consume artifact logs and evaluating models using `utils/eval` helpers: `global_priors_evaluation.ipynb`, `player_thetas_evaluation.ipynb`, `range_evaluation.ipynb`.
+
+## Reproducing experiments (`command_*.sh`)
+
+Root-level wrappers from repo root. Typical order: train priors → fit thetas → run filtering.
+
+| Script | What it runs |
+|--------|----------------|
+| `command_train.sh` | `runners.train` -> `artifacts/global_priors.json` (default: `pluribus/`, `sessions_train.txt`). |
+| `command_theta.sh` | Alias for `command_theta_em.sh`. |
+| `command_theta_em.sh` | `runners.find_theta --em` -> `artifacts/player_thetas_em.json` (default players / sessions in script header). |
+| `command_theta_newton.sh` | `runners.find_theta --newton` -> `artifacts/player_thetas_newton.json`. |
+| `command_filter.sh` | `runners.filter_sessions` with **Newton** thetas; default range CSV name under `artifacts/` (see script). |
+| `command_filter_em.sh` | Same as `command_filter.sh` but **EM** thetas and EM-named range CSV. |
+
+Pass `[PLURIBUS_ROOT]`, `[SESSIONS_FILE]`, optional players, then `--` for extra flags to the Python module (see each script’s header).
+
+## Quick CLI (without shell wrappers)
 
 ```bash
-# Fit global baselines (example paths)
 python -m runners.train pluribus/ --out artifacts/global_priors.json
-
-# Infer per-player theta (requires global_priors.json)
-python -m runners.find_theta pluribus/ --global-priors artifacts/global_priors.json --out artifacts/player_thetas.json
-
-# Batch filtering (see command_filter.sh)
+python -m runners.find_theta pluribus/ --global-priors artifacts/global_priors.json --out artifacts/player_thetas_em.json
 python -m runners.filter_sessions -h
 ```
-
-Use `python -m runners.train -h` and `python -m runners.find_theta -h` for session filters, learning rates, EM iterations, and postflop equity MC sample counts.
 
 ## Tests
 
@@ -63,8 +77,6 @@ Use `python -m runners.train -h` and `python -m runners.find_theta -h` for sessi
 python -m pytest tests/
 ```
 
-## Artifact schema
+## Data layout
 
-`global_priors.json` uses schema key `bayesian_poker.global_priors.v1` and stores `preflop.beta_preflop`, `postflop.beta_facing`, `postflop.beta_no_bet`, feature dimensions, and column labels for traceability.
-
-Postflop `beta` matrices trained at older feature dimensions are **right-padded with zeros** when loaded so extra feature columns behave as unused until retrained (`utils/prior/postflop._coerce_beta_to_phi_dim`).
+**Session folder**: numbered `.phh` files (one hand per file). **Corpus root**: directory whose *children* are session folders. `runners.common.expand_data_path` treats a single session vs a root accordingly.
