@@ -21,13 +21,14 @@ def _coerce_cards(cards: CardsLike) -> List[Card]:
     """Normalize string / iterable input into a list of :class:`Card`."""
     if cards is None:
         return []
+    
     if isinstance(cards, str):
         s = cards.strip()
         if not s:
             return []
         if len(s) % 2 != 0:
             raise ValueError(f"Invalid cards string: {cards!r}")
-        return parse_cards([s[i : i + 2] for i in range(0, len(s), 2)])
+        return parse_cards([s[i: i + 2] for i in range(0, len(s), 2)])  # contiguous rank+suit pairs
 
     out: List[Card] = []
     for item in cards:
@@ -43,28 +44,26 @@ def _coerce_cards(cards: CardsLike) -> List[Card]:
 def combo_key(card_a: Card, card_b: Card) -> str:
     """Canonical 4-character combo key with the higher-ranked card first.
 
-    Ties on rank are broken by suit (C < D < H < S). Suits are emitted in
-    lowercase to match the ``pokerkit`` / ``Hand.hole_cards`` convention
-    (``"AhKh"``), giving a single canonical key for a 2-card holding.
+    Ties on rank are broken by suit (C < D < H < S).
     """
-    a, b = sorted([card_a, card_b], key=lambda c: (-c.value, c.suit))
+    a, b = sorted([card_a, card_b], key=lambda c: (-c.value, c.suit))  # canonical high-rank first
     return f"{a.rank}{a.suit.lower()}{b.rank}{b.suit.lower()}"
 
 
 def parse_combo_key(key: str) -> Tuple[Card, Card]:
-    """Inverse of :func:`combo_key`. O(1) lookup against the canonical table."""
+    """Inverse of `combo_key`. O(1) lookup against the canonical table."""
     if len(key) != 4:
         raise ValueError(f"Combo key must be 4 chars (e.g. 'AhKh'), got {key!r}")
     cached = _COMBO_KEY_TO_CARDS.get(key) if "_COMBO_KEY_TO_CARDS" in globals() else None
     if cached is not None:
-        return cached
+        return cached                                       # fast path once module tables are initialized
     return parse_card(key[0:2]), parse_card(key[2:4])
 
 
 def all_combo_keys() -> List[str]:
-    """All 1,326 unordered 2-card combinations as canonical keys."""
+    """All 1_326 unordered 2-card combinations as canonical keys."""
     deck = all_52_cards()
-    return [combo_key(a, b) for a, b in combinations(deck, 2)]
+    return [combo_key(a, b) for a, b in combinations(deck, 2)]      # 1326 keys
 
 
 def _build_class_to_combos() -> Dict[str, List[Tuple[str, Card, Card]]]:
@@ -78,40 +77,38 @@ def _build_class_to_combos() -> Dict[str, List[Tuple[str, Card, Card]]]:
     table: Dict[str, List[Tuple[str, Card, Card]]] = {
         cls: [] for cls in all_169_classes()
     }
-    for ca, cb in combinations(all_52_cards(), 2):
-        cls = get_equivalence_class([ca, cb])
+    for ca, cb in combinations(all_52_cards(), 2):              
+        cls = get_equivalence_class([ca, cb])               # AKs, TT, …
         table[cls].append((combo_key(ca, cb), ca, cb))
     return table
 
 
 _CLASS_TO_COMBOS: Dict[str, List[Tuple[str, Card, Card]]] = _build_class_to_combos()
-
-_COMBO_KEY_TO_CARDS: Dict[str, Tuple[Card, Card]] = {
+_COMBO_KEY_TO_CARDS: Dict[str, Tuple[Card, Card]] = {       # parse_combo_key fast path after import
     key: (ca, cb)
     for members in _CLASS_TO_COMBOS.values()
     for key, ca, cb in members
-}
+}  
 
-_COMBO_KEY_TO_CLASS: Dict[str, str] = {
+_COMBO_KEY_TO_CLASS: Dict[str, str] = {                     # reverse lookup: specific combo --> 169 class
     key: cls
     for cls, members in _CLASS_TO_COMBOS.items()
     for key, _ca, _cb in members
-}
+}  
 
 
 class ComboRangeFilter:
     """Bayesian filter over the 1,326 concrete 2-card combos.
 
-    ``Q_t(c) ∝ Q_{t-1}(c) * P(a_t | s_t, c)``
+    ``Q_t(c) propto Q_{t-1}(c) * P(a_t | s_t, c)``
 
     where ``c`` is a specific 2-card holding and the action likelihood is
     obtained from the post-flop multinomial-logit prior conditioned on the
     combo-derived made/draw features and the current betting state.
 
-    Likelihoods use ``prior_model``'s frozen ``beta`` matrices; ``theta_post``
-    on this filter is applied via :class:`PostflopActionModel` (same tilt as
-    :meth:`PostflopActionModel.action_probs_matrix_given_theta` with that
-    ``theta_post``). Pass a baseline :class:`PostflopPrior` only; tendency is
+    Likelihoods use prior_model's frozen weights
+    ``theta_post`` is applied via :class:`PostflopActionModel`
+    Pass a baseline :class:`PostflopPrior` only; tendency is
     controlled through ``theta_post`` here.
     """
 
@@ -126,20 +123,21 @@ class ComboRangeFilter:
         theta_post: Sequence[float] | None = None,
         initial_combo_dist: Optional[Mapping[str, float]] = None,
     ):
-        self.observer_name = observer_name
-        self.target_name = target_name
-        self.observer_cards: List[Card] = _coerce_cards(observer_hole_cards)
-        self.board: List[Card] = _coerce_cards(board_cards)
+        self.observer_name = observer_name                                          # hero
+        self.target_name = target_name                                              # villain whose range is inferred
+        self.observer_cards: List[Card] = _coerce_cards(observer_hole_cards)        # private knowledge blocks combos
+        self.board: List[Card] = _coerce_cards(board_cards)                         # public knowledge blocks combos
         self.prior_model = prior_model or PostflopPrior()
         if theta_post is None:
-            self._theta_post = (0.0, 0.0, 0.0)
+            self._theta_post = (0.0, 0.0, 0.0)  # neutral tilts
         else:
             t = tuple(float(x) for x in theta_post)
             if len(t) != 3:
                 raise ValueError("theta_post must have length 3 (fold, passive, aggression tilts).")
             self._theta_post = t
+
         self._action_model = PostflopActionModel(self.prior_model, self._theta_post)
-        self.combos: Dict[str, float] = (
+        self.combos: Dict[str, float] = (                                                   # posterior over combo keys
             normalize(dict(initial_combo_dist)) if initial_combo_dist else {}
         )
         self.steps: List[FilterStep] = []
@@ -154,20 +152,20 @@ class ComboRangeFilter:
 
         Each hand class (e.g. ``AKs``) is mapped to its concrete combos
         (e.g. ``AhKh``, ``AdKd``). Combos that conflict with the observer's
-        hole cards or any visible board card receive **zero** mass. The
+        hole cards or any visible board card receive zero mass. The
         remaining valid combos for that class share the class probability
         uniformly. The returned distribution is normalized to sum to 1.
 
-        Each hand class has a fixed combo count (pair → 6, suited → 4,
-        offsuit → 12). The static ``class -> combos`` table is built once at
+        Each hand class has a fixed combo count (pair -> 6, suited -> 4,
+        offsuit -> 12). The static ``class -> combos`` table is built once at
         import time so this routine only iterates the (at most 1,326) cached
         members of the requested classes — no 52-card combinatorics per call.
         """
-        observer = _coerce_cards(observer_cards)
-        board_cards = _coerce_cards(board)
-        dead = set(observer) | set(board_cards)
+        observer = _coerce_cards(observer_cards)   
+        board_cards = _coerce_cards(board)          
+        dead = set(observer) | set(board_cards)         
 
-        combo_dist: Dict[str, float] = {}
+        combo_dist: Dict[str, float] = {} 
         for hand_class, prob in preflop_range.items():
             mass = float(prob)
             if mass <= 0.0:
@@ -178,8 +176,8 @@ class ComboRangeFilter:
             live = [(key, ca, cb) for key, ca, cb in members if ca not in dead and cb not in dead]
             if not live:
                 continue
-            share = mass / len(live)
-            for key, _ca, _cb in live:
+            share = mass / len(live)             # uniform split of class mass over live combos
+            for key, _, _ in live:
                 combo_dist[key] = combo_dist.get(key, 0.0) + share
 
         if not combo_dist:
@@ -196,7 +194,7 @@ class ComboRangeFilter:
         board: Optional[CardsLike] = None,
         observer_hole_cards: Optional[CardsLike] = None,
     ) -> Dict[str, float]:
-        """Initialise ``self.combos`` from a pre-flop class distribution.
+        """Init ``self.combos`` from a pre-flop class distribution.
 
         Optionally update the observer hole cards or board first so the
         bridge always reflects current public/private knowledge.
@@ -244,7 +242,7 @@ class ComboRangeFilter:
             raise ValueError(
                 "set_board: every combo is now blocked by observer cards or board."
             )
-        self.combos = normalize(survivors) if renormalize else survivors
+        self.combos = normalize(survivors) if renormalize else survivors    # prune then sum to 1
         return self.combos
 
     @staticmethod
@@ -278,7 +276,7 @@ class ComboRangeFilter:
             raise ValueError(
                 "narrow_combo_distribution: every combo is blocked by observer cards or board."
             )
-        return normalize(survivors) if renormalize else survivors
+        return normalize(survivors) if renormalize else survivors  # same semantics as set_board
 
     def update(
         self,
@@ -286,15 +284,16 @@ class ComboRangeFilter:
         feature_by_combo: Mapping[str, PostflopFeatures],
         state_key: StateKey | str = "",
     ) -> Dict[str, float]:
-        """Apply ``Q_{t+1}(c) ∝ Q_t(c) * P(a_t | s_t, c)``.
+        """Apply ``Q_{t+1}(c) propto Q_t(c) * P(a_t | s_t, c)``.
 
-        ``feature_by_combo`` maps each canonical combo key to the
-        :class:`PostflopFeatures` derived from that combo together with the
-        current betting state and board. Combos with no entry are zeroed
-        out. Internally we batch every live combo into a single
+        ``feature_by_combo`` maps each canonical combo key to the PostflopFeatures 
+        derived from that combo together with the current betting state and board. 
+        Combos with no entry are zeroed out. 
+        
+        Internally we batch every live combo into a single
         ``(N, PHI_DIM)`` feature matrix and let
         :meth:`PostflopPrior.action_probs_matrix_given_theta` apply the filter's
-        ``theta_post`` tilt with one matmul + softmax per batch (Method D).
+        ``theta_post`` tilt with one matmul + softmax per batch.
         """
         if not self.combos:
             raise ValueError(
@@ -310,7 +309,7 @@ class ComboRangeFilter:
                 continue
             feat = feature_by_combo.get(combo)
             if feat is None:
-                continue
+                continue                                                                # no features --> zero likelihood mass
             live_combos.append(combo)
             live_probs.append(float(prob))
             live_feats.append(feat)
@@ -318,16 +317,16 @@ class ComboRangeFilter:
         if live_combos:
             from utils.action.postflop import feature_vector
 
-            feature_matrix = np.stack([feature_vector(f) for f in live_feats], axis=0)
+            feature_matrix = np.stack([feature_vector(f) for f in live_feats], axis=0)  # (N, PHI_DIM)
             facing = np.fromiter(
                 (f.facing_bet for f in live_feats),
                 dtype=bool,
                 count=len(live_feats),
             )
             probs_matrix = self._action_model.action_probs_matrix(feature_matrix, facing)
-            action_col = probs_matrix[:, int(action_bucket)]
+            action_col = probs_matrix[:, int(action_bucket)]                            # likelihood of observed bucket
             prior_arr = np.asarray(live_probs, dtype=float)
-            unnorm_arr = prior_arr * action_col
+            unnorm_arr = prior_arr * action_col                                         # Bayes: prior × likelihood
             unnorm = {
                 c: float(v)
                 for c, v in zip(live_combos, unnorm_arr)
@@ -344,7 +343,7 @@ class ComboRangeFilter:
                 f"target={self.target_name})."
             )
 
-        self.combos = {c: v / evidence for c, v in unnorm.items()}
+        self.combos = {c: v / evidence for c, v in unnorm.items()}                      # posterior normalize
 
         state_key_str = (
             state_key.as_string() if isinstance(state_key, StateKey) else str(state_key)
@@ -355,7 +354,7 @@ class ComboRangeFilter:
                 state_key=state_key_str,
                 action_bucket=action_bucket,
                 evidence=evidence,
-                ess=effective_sample_size(self.combos),
+                ess=effective_sample_size(self.combos),                                 # diagnostic concentration
                 top_class=top_combo,
                 top_prob=top_prob,
                 layer="combo",
@@ -364,7 +363,7 @@ class ComboRangeFilter:
         return self.combos
 
     def top_k(self, k: int = 10) -> List[Tuple[str, float]]:
-        return sorted(self.combos.items(), key=lambda x: x[1], reverse=True)[:k]
+        return sorted(self.combos.items(), key=lambda x: x[1], reverse=True)[:k]  # highest mass combos
 
     def class_marginal(self) -> Dict[str, float]:
         """Aggregate the combo distribution back onto the 169 hand classes."""
@@ -373,7 +372,7 @@ class ComboRangeFilter:
             cls = _COMBO_KEY_TO_CLASS.get(combo)
             if cls is None:
                 ca, cb = parse_combo_key(combo)
-                cls = get_equivalence_class([ca, cb])
+                cls = get_equivalence_class([ca, cb])  # fallback if key missing from static map
             out[cls] = out.get(cls, 0.0) + prob
         return out
 
@@ -381,7 +380,7 @@ class ComboRangeFilter:
         if len(combo) != 4:
             raise ValueError(f"true_combo_probability expects a 4-char key, got {combo!r}")
         a, b = parse_combo_key(combo)
-        return self.combos.get(combo_key(a, b), 0.0)
+        return self.combos.get(combo_key(a, b), 0.0)  # canonical key lookup
 
     def log_likelihood(self) -> float:
-        return sum(math.log(step.evidence) for step in self.steps if step.evidence > 0)
+        return sum(math.log(step.evidence) for step in self.steps if step.evidence > 0)  # sum log p(a|s)

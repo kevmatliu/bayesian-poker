@@ -13,39 +13,42 @@ MODE = StrengthMode.PREFLOP
 
 @dataclass(frozen=True)
 class HandClassFeatures:
-    high: int
-    low: int
+    high: int           # higher hole rank as int value
+    low: int            # lower hole rank (equals high for pairs)
     pair: bool
     suited: bool
-    gap: int
-    broadways: int
+    gap: int            # rank steps between high and low (0 = connected)
+    broadways: int      # count of T+ ranks in the two cards
     has_ace: bool
-    strength: float
+    strength: float     # heuristic [0,1]-ish score before clamp
 
 
 def _clamp(v: float, lo: float, hi: float) -> float:
-    return max(lo, min(hi, v))
+    return max(lo, min(hi, v))  # pin to [lo, hi]
 
 
 def hand_class_features(hand_class: str) -> HandClassFeatures:
-    """Encode a 169-style label (e.g. ``AKs``, ``TT``) into features + heuristic strength."""
+    """
+    Used heuristics to encode the playability of a hand class as a single scalar feature.
+    Blend of high-card strength, suitedness, connectedness, and presence of broadway cards or an Ace.
+    """
     if len(hand_class) == 2:
-        high = low = RANK_TO_VALUE[hand_class[0]]
+        high = low = RANK_TO_VALUE[hand_class[0]]   # pair label "TT"
         pair, suited = True, False
     elif len(hand_class) == 3:
         high = RANK_TO_VALUE[hand_class[0]]
         low = RANK_TO_VALUE[hand_class[1]]
         pair = False
-        suited = hand_class[2] == "s"
+        suited = hand_class[2] == "s"               # trailing s/o
     else:
         raise ValueError(f"Invalid hand class: {hand_class!r}")
 
-    gap = max(0, high - low - 1)
-    broadways = int(high >= 10) + int(low >= 10)
+    gap = max(0, high - low - 1)                    # e.g. AK gap 0, AQ gap 1
+    broadways = int(high >= 10) + int(low >= 10)    # TJQK count
     has_ace = high == 14 or low == 14
 
     if pair:
-        strength = 0.52 + 0.45 * ((high - 2) / 12)
+        strength = 0.52 + 0.45 * ((high - 2) / 12)  # higher pair → stronger
     else:
         connector_bonus = (
             0.10
@@ -55,7 +58,7 @@ def hand_class_features(hand_class: str) -> HandClassFeatures:
             else 0.03
             if gap == 2
             else 0.0
-        )
+        )                                           # small bonus for connectedness
 
         strength = (
             0.10
@@ -66,7 +69,7 @@ def hand_class_features(hand_class: str) -> HandClassFeatures:
             + 0.04 * broadways
             + (0.05 if has_ace else 0.0)
             - 0.025 * max(0, gap - 2)
-        )
+        )                                           # blend high card, suit, connectivity, ace
 
     return HandClassFeatures(
         high=high,
@@ -85,7 +88,7 @@ def get_equivalence_class(cards: List[Card]) -> str:
     if len(cards) != 2:
         raise ValueError("Equivalence classes are only defined for 2-card hands.")
 
-    c1, c2 = sorted(cards, key=lambda c: c.value, reverse=True)
+    c1, c2 = sorted(cards, key=lambda c: c.value, reverse=True)  # high card first
     suited = c1.suit == c2.suit
     rank1 = VALUE_TO_RANK[c1.value]
     rank2 = VALUE_TO_RANK[c2.value]
@@ -102,7 +105,7 @@ def all_169_classes() -> List[str]:
     ranks = "AKQJT98765432"
     classes: List[str] = []
     for i in range(len(ranks)):
-        for j in range(i, len(ranks)):
+        for j in range(i, len(ranks)):  # upper triangle incl. diagonal
             r1, r2 = ranks[i], ranks[j]
             if i == j:
                 classes.append(f"{r1}{r2}")

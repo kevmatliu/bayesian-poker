@@ -1,12 +1,18 @@
-"""Shared expectation–maximization helpers.
+"""
+Helper functions for EM implementations in both preflop and postflop modules.
 
-``normalize_log_weights`` applies the log-sum-exp trick to turn unnormalized
-log-masses (E-step outputs) into probability tables over string keys (hand
-classes or combo keys).
+``normalize_log_weights``:
+- convert unnormalized log-weights to probabilities using log-sum-exp
 
-``minibatch_plan`` selects bundle/hand indices for stochastic M-steps: the
-returned scale factor reweights the batch gradient so it is unbiased for the
-full-data sum.
+``effective_sample_size``:
+- computes the ESS of a discrete distribution, 1 / sum p^2
+
+``max_effective_sample_size``:
+- computes the max ESS across a sequence of distributions for logging and diagnostics purposes
+
+``minibatch_plan``:
+- under the EM mini-batching variant, selects bundle/hand indices for stochastic M-steps
+- returned scale factor reweights the batch gradient to maintain unbiasedness for the full data
 """
 
 from __future__ import annotations
@@ -16,49 +22,45 @@ from typing import Dict, Mapping, Sequence, Tuple
 
 import numpy as np
 
-# M-step gradient ascent stops when L2 norm of grad falls below this (after L2 penalty on theta).
-M_STEP_GRAD_NORM_TOL = 0.1
+M_STEP_GRAD_NORM_TOL = 0.1  # convergence tolerance of the gradient ascent M-step for theta_post
 
-# Default minibatch sizes (bundles / hands per gradient step). Use 0 for full-batch in callers.
-PREFLOP_M_BATCH_SIZE = 64
-POSTFLOP_M_BATCH_SIZE = 64
+PREFLOP_M_BATCH_SIZE = 64   # default, 0 or negative means no mini-batching (full batch M-step)
+POSTFLOP_M_BATCH_SIZE = 64  # mirror default for postflop bundle gradient stacks
 
 
 def normalize_log_weights(log_weights: Dict[str, float]) -> Dict[str, float]:
-    """Convert unnormalized log-weights ``log w_i`` to probabilities ``w_i / sum w``.
-
-    Subtracts ``max_j log w_j`` before exponentiating for stability. Raises if
-    the dictionary is empty or if the total mass is non-positive (numerical
-    underflow or inconsistent inputs).
+    """
+    Helper function to normalize log-weights using log-sum-exp
     """
     if not log_weights:
         raise ValueError("normalize_log_weights: empty input")
-    m = max(log_weights.values())
-    weights = {h: math.exp(w - m) for h, w in log_weights.items()}
-    total = sum(weights.values())
-    if total <= 0:
+    m = max(log_weights.values())                                   # log-sum-exp
+    weights = {h: math.exp(w - m) for h, w in log_weights.items()} 
+    total = sum(weights.values())                                  
+    if total <= 0:                                                 
         raise ValueError("normalize_log_weights: zero total mass")
-    return {h: v / total for h, v in weights.items()}
+    return {h: v / total for h, v in weights.items()}               # proper pmf over latent keys
 
 
 def effective_sample_size(probabilities: Sequence[float]) -> float:
-    """ESS = (sum p)² / sum p² for a discrete distribution (sum p is usually 1)."""
-    ps = list(probabilities)
-    if not ps:
+    """ESS = (sum p)^2 / sum p^2 for a discrete distribution (sum p is usually 1)."""
+    ps = list(probabilities) 
+    if not ps: 
         return 0.0
     s = sum(ps)
     den = sum(p * p for p in ps)
     if den <= 0.0:
         return 0.0
+    
     return (s * s) / den
 
 
 def max_effective_sample_size(q_by_item: Sequence[Mapping[str, float]]) -> float:
     """Largest per-item ESS when each mapping is a distribution over latent keys."""
-    best = 0.0
-    for qmap in q_by_item:
-        ess = effective_sample_size(list(qmap.values()))
-        if ess > best:
+    best = 0.0                                            # running maximum across items
+    for qmap in q_by_item:                                # each hand / timestep posterior
+        ess = effective_sample_size(list(qmap.values()))  # ESS of that discrete distribution
+        if ess > best:                                    # track peak concentration for diagnostics
             best = ess
     return best
 
@@ -73,10 +75,11 @@ def minibatch_plan(
     Returns ``(indices, scale, full_batch)`` where ``scale`` is ``n_items / len(indices)``
     when minibatching (unbiased SG for the sum over all items), else ``1.0``.
     """
-    if n_items <= 0:
+    if n_items <= 0:                                     # invalid batching problem size
         raise ValueError("minibatch_plan: n_items must be positive")
-    if m_batch_size <= 0 or m_batch_size >= n_items:
+    if m_batch_size <= 0 or m_batch_size >= n_items:     # use full dataset (exact M-step)
         return np.arange(n_items, dtype=int), 1.0, True
-    bsz = min(int(m_batch_size), n_items)
-    ix = rng.choice(n_items, size=bsz, replace=False)
-    return ix, n_items / float(bsz), False
+    bsz = min(int(m_batch_size), n_items)                # never request more than available items
+    ix = rng.choice(n_items, size=bsz, replace=False)    # uniform subsample without replacement
+
+    return ix, n_items / float(bsz), False               # debias stochastic gradient sum

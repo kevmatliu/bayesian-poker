@@ -29,7 +29,7 @@ from utils.strength.postflop import (
     hand_feature_vector,
 )
 
-POSTFLOP_STREETS = ("flop", "turn", "river")
+POSTFLOP_STREETS = ("flop", "turn", "river")  # streets with community cards (excludes preflop)
 
 
 def postflop_target_decisions_for_hand(hand, target: str) -> List[Tuple[str, int, Tuple]]:
@@ -37,7 +37,7 @@ def postflop_target_decisions_for_hand(hand, target: str) -> List[Tuple[str, int
     decisions: List[Tuple[str, int, Tuple]] = []
     for street in POSTFLOP_STREETS:
         actions = hand.actions.get(street, {})
-        for action_index in sorted(actions):
+        for action_index in sorted(actions):  # temporal order within street
             actor = actions[action_index][0]
             if actor != target:
                 continue
@@ -51,13 +51,13 @@ def raw_action_bucket_to_postflop(bucket: int) -> int:
         return FOLD
     if bucket == 1:
         return CALL
-    return RAISE
+    return RAISE  # any raise-like bucket -> single RAISE class here
 
 
 def _street_commitments(betting_history: List) -> Dict[str, float]:
     committed: Dict[str, float] = {}
     for player, _, amt in betting_history:
-        committed[player] = float(amt)
+        committed[player] = float(amt)  # last-seen street total per player (history is append-only)
     return committed
 
 
@@ -73,17 +73,17 @@ def _board_wetness_from_mapper(texture: dict) -> float:
         score += 0.15
     if texture.get("very_connected"):
         score += 0.1
-    return min(1.0, score)
+    return min(1.0, score)  # cap heuristic into [0, 1]
 
 
 def _acting_order_active(player_order: List[str], alive: List[Tuple[str, bool]]) -> List[str]:
     alive_set = {p for p, ok in alive if ok}
-    return [p for p in player_order if p in alive_set]
+    return [p for p in player_order if p in alive_set]  # preserve table order, drop folders
 
 
 def _in_position_last_actor(player_order: List[str], alive: List[Tuple[str, bool]], target: str) -> bool:
     act = _acting_order_active(player_order, alive)
-    return bool(act) and act[-1] == target
+    return bool(act) and act[-1] == target  # IP = act last among survivors
 
 
 @dataclass(frozen=True)
@@ -103,20 +103,20 @@ class StateContext:
 def state_context_from_state(state, target: str, street: str) -> Optional[StateContext]:
     """Compute the combo-independent context for ``target`` acting next."""
     board = state.community_cards or ""
-    if len(board) < 6:  # need at least the 3-card flop
+    if len(board) < 6:                                                      # need at least the 3-card flop
         return None
 
     hist = state.betting_history or []
     committed = _street_commitments(hist)
-    max_c = max(committed.values()) if committed else 0.0
+    max_c = max(committed.values()) if committed else 0.0                   # street cap so far
     tgt_c = committed.get(target, 0.0)
-    to_call = max(0.0, max_c - tgt_c)
+    to_call = max(0.0, max_c - tgt_c)                                       # marginal chips to continue
     facing_bet = to_call > 1e-6
 
     pot = float(state.pot_size)
     stacks = state.current_stacks or {}
     stack_t = float(stacks.get(target, 0.0))
-    spr = stack_t / max(pot, 1e-6)
+    spr = stack_t / max(pot, 1e-6)                                          # effective stack-to-pot
 
     alive = state.players_in_hand or []
     n_active = sum(1 for _, ok in alive if ok)
@@ -132,11 +132,11 @@ def state_context_from_state(state, target: str, street: str) -> Optional[StateC
             return None
         tex = board_texture(b_cards)
     except (ValueError, Exception):
-        tex = {}
+        tex = {}                                                            # malformed board -> neutral wetness
     wet = _board_wetness_from_mapper(tex)
 
-    bet_frac = (to_call / max(pot, 1e-6)) if facing_bet else 0.0
-    pot_odds = (to_call / max(pot + to_call, 1e-6)) if facing_bet else 0.0
+    bet_frac = (to_call / max(pot, 1e-6)) if facing_bet else 0.0            # price relative to current pot
+    pot_odds = (to_call / max(pot + to_call, 1e-6)) if facing_bet else 0.0  # standard pot-odds formula
 
     return StateContext(
         bet_frac_pot=bet_frac,
@@ -160,11 +160,10 @@ def features_from_context(
 ) -> PostflopFeatures:
     """Combine state context with a combo's made/draw scores.
 
-    ``rich`` (Method A) carries the board-relative categorical
-    indicators produced by :func:`utils.strength.postflop.hand_feature_vector`,
-    and ``equity`` (Method E) is the expected made percentile over future
-    runouts. Both default to neutral values so callers that only
-    supply ``(made, draw)`` still produce a valid feature row.
+    Rich carries the board-relative categorical indicators 
+    produced by `utils.strength.postflop.hand_feature_vector`,
+
+    Equity is expected made percentile over future runouts. 
     """
     return PostflopFeatures(
         made=float(made),
@@ -190,7 +189,7 @@ def compute_postflop_strength_bundle(
 ) -> Optional[PostflopStrengthBundle]:
     """Made / draw / rich / equity for a fixed board string + hole (no pot or position).
 
-    Used by :func:`collect_postflop_observations_known_hole_cards` so repeated
+    Used by `collect_postflop_observations_known_hole_cards` so repeated
     decisions on the same board only pay for one flop rollout / percentile pass.
     """
     if not hole_cards or len(hole_cards) < 4 or not board or len(board) < 6:
@@ -203,17 +202,17 @@ def compute_postflop_strength_bundle(
     if len(board_cards) < 3 or len(hole) != 2:
         return None
 
-    board_tuple = tuple(sorted(card_to_index(c) for c in board_cards))
-    combo_key = combo_key_from_indices(card_to_index(hole[0]), card_to_index(hole[1]))
+    board_tuple = tuple(sorted(card_to_index(c) for c in board_cards))                  # suit-blind board key for tables
+    combo_key = combo_key_from_indices(card_to_index(hole[0]), card_to_index(hole[1]))  # shadows filter.combo_key name
 
     made_p = made_percentile_at_combo_key(board_tuple, combo_key)
-    made = 0.5 if made_p is None else float(made_p)
+    made = 0.5 if made_p is None else float(made_p)                                     # missing entry -> neutral mid-rank
     draw = float(draw_strength_from_hand(hole, board_cards))
     rich = hand_feature_vector(hole, board_cards)
 
-    mc = equity_mc_samples if len(board_tuple) == 3 else None
+    mc = equity_mc_samples if len(board_tuple) == 3 else None                           # MC only on flop; turn/river exact-ish
     eq_p = rollout_equity_at_combo_key(board_tuple, combo_key, mc_samples=mc)
-    equity = float(made if eq_p is None else eq_p)
+    equity = float(made if eq_p is None else eq_p)                                      # fallback to static made when rollout missing
     return (made, draw, rich, equity)
 
 
@@ -226,13 +225,12 @@ def postflop_features_from_state(
     equity_mc_samples: Optional[int] = 32,
     strength_bundle: Optional[PostflopStrengthBundle] = None,
 ) -> Optional[PostflopFeatures]:
-    """Compute features for *target* acting next in ``state`` with known hole cards.
+    """Compute features for target acting next in ``state`` with known hole cards.
 
     Uses cached per-board tensors plus O(1) combo lookups — avoids rebuilding
-    full percentile / equity dicts on every street action (see
-    :func:`utils.strength.fast_eval.made_percentile_at_combo_key`).
+    full percentile / equity dicts on every street action.
 
-    Pass ``strength_bundle`` from :func:`compute_postflop_strength_bundle` when the
+    Pass ``strength_bundle`` from `compute_postflop_strength_bundle` when the
     board + hole are unchanged so pot / position context can update without
     recomputing rollouts.
     """
@@ -243,7 +241,7 @@ def postflop_features_from_state(
         return None
 
     if strength_bundle is not None:
-        made, draw, rich, equity = strength_bundle
+        made, draw, rich, equity = strength_bundle      # caller cached board+hole strengths
     else:
         board = state.community_cards or ""
         bundle = compute_postflop_strength_bundle(
@@ -261,7 +259,7 @@ def postflop_features_from_state(
         in_position=context.in_position,
         multiway=context.multiway,
         spr=context.spr,
-        street=street,
+        street=street,                                  # explicit street label (context carries same)
         board_wetness=context.board_wetness,
         facing_bet=context.facing_bet,
         rich=rich,
@@ -269,8 +267,8 @@ def postflop_features_from_state(
     )
 
 
-# Type alias for the strength cache: maps board string to a dict of
-# ``combo_key → (made, draw, rich, equity)`` rows. Cached by the runner
+
+# combo_key --> (made, draw, rich, equity)`` rows. Cached by the runner
 # across consecutive actions that share the same community cards.
 ComboStrengthEntry = Tuple[float, float, np.ndarray, float]
 ComboStrengthCache = Dict[str, Dict[str, ComboStrengthEntry]]
@@ -284,17 +282,17 @@ def _build_combo_strength_table(
     """All-at-once ``(made, draw, rich, equity)`` for every live combo on ``board``.
 
     Uses the cached per-board percentile and rollout-equity tables
-    (Methods 1 & E) so each combo costs O(1) lookups instead of an
-    opponent-enumeration sweep. The ``rich`` block (Method A) is
+    so each combo costs O(1) lookups instead of an
+    opponent-enumeration sweep. The rich block (Method A) is
     recomputed locally from the parsed hole cards (~1 µs per combo).
     """
     board_cards = parse_cards([board[i : i + 2] for i in range(0, len(board), 2)])
     if len(board_cards) < 3:
         return {}
-    board_idx = tuple(card_to_index(c) for c in board_cards)
+    board_idx = tuple(card_to_index(c) for c in board_cards)  # ordered indices for tensor lookup
     made_table = made_percentile_by_combo_key(board_idx)
     if len(board_idx) >= 5:
-        equity_table = made_table
+        equity_table = made_table                             # river: no future runouts; reuse made percentile as equity proxy
     else:
         equity_table = rollout_equity_by_combo_key(
             board_idx,
@@ -307,7 +305,7 @@ def _build_combo_strength_table(
         hole = [ca, cb]
         draw = draw_strength_from_hand(hole, board_cards)
         rich = hand_feature_vector(hole, board_cards)
-        equity = float(equity_table.get(key, made))
+        equity = float(equity_table.get(key, made))           # combo missing from equity tensor -> made
         out[key] = (float(made), float(draw), rich, equity)
     return out
 
@@ -328,7 +326,7 @@ def precompute_combo_strengths(
     successive action updates on the same street are free.
     """
     if cache is not None and board in cache:
-        full = cache[board]
+        full = cache[board]  # hot path: reuse full board table
     else:
         full = _build_combo_strength_table(
             board, equity_mc_samples=equity_mc_samples
@@ -340,7 +338,7 @@ def precompute_combo_strengths(
     for combo in combos:
         entry = full.get(combo)
         if entry is None:
-            continue
+            continue         # blocked combo or off-support
         out[combo] = entry
     return out
 
@@ -356,7 +354,7 @@ def combo_features_for_state(
 ) -> Tuple[Optional[StateContext], Dict[str, PostflopFeatures]]:
     """Return ``(context, {combo_key: PostflopFeatures})`` for an action point.
 
-    Combos blocked by the board (or otherwise un-evaluable) are silently
+    Combos blocked by the board (or otherwise un-evaluable) are
     dropped from the output map. ``strength_cache`` is keyed by the
     board string and is only valid for as long as the community cards
     don't change — clear it on the turn / river deal.
@@ -367,7 +365,7 @@ def combo_features_for_state(
 
     board = state.community_cards or ""
     board_cards = parse_cards([board[i : i + 2] for i in range(0, len(board), 2)])
-    board_set = set(board_cards)
+    board_set = set(board_cards)  # cards that cannot appear in a live hole
 
     eligible: List[str] = []
     for combo in combos:
@@ -376,7 +374,7 @@ def combo_features_for_state(
         except ValueError:
             continue
         if ca in board_set or cb in board_set:
-            continue
+            continue              # combo collides with board -> impossible holding
         eligible.append(combo)
 
     strengths = precompute_combo_strengths(
@@ -387,7 +385,7 @@ def combo_features_for_state(
     for combo, (made, draw, rich, equity) in strengths.items():
         feats[combo] = features_from_context(
             context, made, draw, rich=rich, equity=equity
-        )
+        )                         # same pot/IP context, per-combo strength slice
     return context, feats
 
 
@@ -399,14 +397,12 @@ def collect_postflop_em_bundle_for_hand(
     *,
     target_actions: Optional[List[Tuple[str, int, Tuple]]] = None,
 ) -> Optional[PostflopEMHandBundle]:
-    """EM bundle: same prior construction as preflop EM (initial_class_prior → 1,326 combos).
+    """EM bundle: same prior construction as preflop EM (initial_class_prior --> 1,326 combos).
 
     Uses observer dead cards + board progression for support only (no Bayesian filtering on
     actions). Target hole cards are not required.
 
-    Pass ``target_actions`` when the caller already computed
-    :func:`postflop_target_decisions_for_hand` for this (hand, target) — e.g. once per hand
-    instead of once per observer.
+    Pass ``target_actions`` when the caller already computed.
     """
     if observer == target:
         return None
@@ -416,7 +412,7 @@ def collect_postflop_em_bundle_for_hand(
         return None
 
     observer_hole = hand.hole_cards.get(observer, "") or ""
-    initial_169 = normalize(initial_class_prior(dead_cards=observer_hole))
+    initial_169 = normalize(initial_class_prior(dead_cards=observer_hole))                     # Pluribus-style 169 prior
 
     timesteps: List[PostflopEMTimestep] = []
     strength_cache: ComboStrengthCache = {}
@@ -441,10 +437,10 @@ def collect_postflop_em_bundle_for_hand(
                         initial_169,
                         observer_hole,
                         board,
-                    )
+                    )                                                                          # first postflop street: 169 -> 1326 support
                 except ValueError:
                     return None
-                initial_snapshot = dict(combos)
+                initial_snapshot = dict(combos)                                                # EM starting distribution (before Bayes updates)
                 initialized = True
             else:
                 try:
@@ -452,11 +448,11 @@ def collect_postflop_em_bundle_for_hand(
                         combos,
                         observer_hole_cards=observer_hole,
                         board_cards=board,
-                    )
+                    )                                                                          # drop combos inconsistent with new board cards
                 except ValueError:
                     return None
             last_board = board
-            strength_cache.clear()
+            strength_cache.clear()                                                             # board changed -> recompute strength table
 
         _, feats = combo_features_for_state(
             state,
@@ -470,7 +466,7 @@ def collect_postflop_em_bundle_for_hand(
 
         raw_bucket = int(raw_action[1][0])
         post_action = raw_action_bucket_to_postflop(raw_bucket)
-        sparse_pairs = tuple((c, feats[c]) for c in combos if combos[c] > 0.0 and c in feats)
+        sparse_pairs = tuple((c, feats[c]) for c in combos if combos[c] > 0.0 and c in feats)  # skip zero-mass combos
         if not sparse_pairs:
             continue
         timesteps.append(PostflopEMTimestep(action=post_action, features_by_combo=sparse_pairs))
@@ -479,7 +475,7 @@ def collect_postflop_em_bundle_for_hand(
         return None
     return PostflopEMHandBundle(
         decisions=tuple(timesteps),
-        initial_combo_range=normalize(dict(initial_snapshot)),
+        initial_combo_range=normalize(dict(initial_snapshot)),                                 # L1-normal copy for downstream
     )
 
 
@@ -492,15 +488,13 @@ def collect_postflop_observations_known_hole_cards(
 ) -> Optional[PostflopThetaObservation]:
     """Single combo observation for one hand if ``target`` hole cards are known.
 
-    ``equity_mc_samples``: flop rollout Monte Carlo size when building Method E
-    equity (default **8** for bulk training speed; use **32** for closer match to
-    interactive runner defaults).
+    ``equity_mc_samples``: flop rollout Monte Carlo size when building equity (default 8 for bulk training speed)
     """
     hole = hand.hole_cards.get(target, "") or ""
     if len(hole) < 4:
         return None
 
-    combo_key = f"h{hand_index}|{hole}"
+    combo_key = f"h{hand_index}|{hole}"  # unique id for this hand+hole in session EM
     decisions: List[Tuple[PostflopFeatures, int]] = []
     # Same (community_cards, hole) often repeats across many postflop actions.
     strength_by_board_hole: Dict[Tuple[str, str], PostflopStrengthBundle] = {}
@@ -529,18 +523,18 @@ def collect_postflop_observations_known_hole_cards(
                 strength_by_board_hole[bh_key] = b
             feat = postflop_features_from_state(
                 st, target, street, hole, strength_bundle=strength_by_board_hole[bh_key]
-            )
+            )                            # pot/IP from st; strengths from cache
             if feat is None:
                 continue
             a = raw_action_bucket_to_postflop(bucket)
-            decisions.append((feat, a))
+            decisions.append((feat, a))  # (feature row, FOLD/CALL/RAISE label)
 
     if not decisions:
         return None
 
     return PostflopThetaObservation(
         combo_key=combo_key,
-        log_prior_range=0.0,
+        log_prior_range=0.0,             # caller may overwrite with external log-prior
         decisions=tuple(decisions),
     )
 
@@ -554,10 +548,10 @@ def collect_session_postflop_bundles_by_pair(
     out: Dict[Tuple[str, str], List[PostflopEMHandBundle]] = {}
     for observer in observers:
         for target in targets:
-            out[(observer, target)] = []
+            out[(observer, target)] = []                                                  # accumulate bundles per directed pair
 
     for hi, hand in enumerate(hands):
-        ta_by_target = {t: postflop_target_decisions_for_hand(hand, t) for t in targets}
+        ta_by_target = {t: postflop_target_decisions_for_hand(hand, t) for t in targets}  # compute once per hand
         for observer in observers:
             for target in targets:
                 if observer == target:

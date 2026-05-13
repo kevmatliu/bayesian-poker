@@ -11,8 +11,7 @@ from itertools import combinations
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
-from pipeline_common import load_json, read_session_names_file
-from priors_artifacts import preflop_postflop_priors_for_target
+from .common import load_json, preflop_postflop_priors_for_target, read_session_names_file
 from utils.filter import ComboRangeFilter
 from utils.parse import Session
 from utils.postflop_runner_bridge import POSTFLOP_STREETS

@@ -12,7 +12,7 @@ from typing import Any, Dict, List, Optional, Sequence
 
 import numpy as np
 
-from pipeline_common import (
+from .common import (
     HandRef,
     collect_postflop_supervised_rows,
     collect_preflop_supervised_rows,
@@ -149,10 +149,10 @@ def train_global_priors(
 
     Pipeline:
 
-    1. **Load** — Either use ``refs`` directly or call :func:`pipeline_common.flatten_hands`
+    1. **Load** — Either use ``refs`` directly or call :func:`runners.common.flatten_hands`
        on ``inputs`` with optional session filters.
-    2. **Supervised rows** — :func:`pipeline_common.collect_preflop_supervised_rows`
-       and :func:`pipeline_common.collect_postflop_supervised_rows` (known hole
+    2. **Supervised rows** — :func:`runners.common.collect_preflop_supervised_rows`
+       and :func:`runners.common.collect_postflop_supervised_rows` (known hole
        cards only). Postflop equity features use ``postflop_equity_mc`` Monte
        Carlo samples on the flop for speed.
     3. **Fit** — Multinomial logit for preflop (3-way) and two postflop heads

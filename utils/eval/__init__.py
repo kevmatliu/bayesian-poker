@@ -10,6 +10,7 @@ from utils.eval.brier import (
     class_distribution_to_vector,
     multiclass_brier,
 )
+from utils.eval.plot_made_distribution import plot_made_distribution
 from utils.eval.strength import (
     actual_made_and_draw,
     actual_made_percentile_at_combo_index,
@@ -31,11 +32,57 @@ from utils.eval.online_csv import (
     meta_columns_present,
 )
 from utils.eval.table import (
+    betting_history_on_street,
+    betting_history_up_to_street_end,
     board_at_street_end,
+    format_betting_action,
+    format_betting_history_serial,
     hand_number_from_path,
     seat_columns,
     session_phh_files,
 )
+
+from utils.eval.repo_paths import (
+    default_global_priors_eval_session_paths,
+    find_repo_root,
+    resolve_session_filter_path,
+    resolve_session_theta_path,
+    resolve_session_train_path,
+)
+from utils.eval.global_priors_supervised import (
+    GlobalPriorsSupervisedBundle,
+    default_supervised_cache_path,
+    load_or_build_global_priors_supervised,
+)
+from utils.eval.action_heads import (
+    confusion_matrix_counts,
+    empirical_marginal,
+    global_priors_three_head_predictions,
+    mean_brier,
+    metric_rows_three_heads,
+    nll,
+    predict_probs,
+    remap_no_bet_labels,
+    row_normalise,
+    softmax_rows,
+    summarize_metric_rows,
+    top1_accuracy,
+)
+from utils.eval.player_thetas_eval import (
+    build_player_prediction_dict,
+    em_and_online_refs,
+    load_global_betas,
+    load_player_thetas,
+    online_summary_rows,
+)
+from utils.eval.preflop_range_posterior_eval import (
+    compute_all_posterior_results,
+    default_observer_map,
+    em_and_online_hand_refs,
+    ranks_from_results,
+    true_hand_nll,
+)
+from utils.eval.filter_sessions_range_csv import run_filter_sessions_range_evaluation
 
 __all__ = [
     "MADE_STRENGTH_PCT_COLUMN_PREFIX",
@@ -45,6 +92,8 @@ __all__ = [
     "actual_made_percentile_at_combo_index",
     "add_calibration_columns",
     "board_at_street_end",
+    "betting_history_on_street",
+    "betting_history_up_to_street_end",
     "brier_postflop1326",
     "brier_preflop169",
     "brier_preflop_from_combo1326",
@@ -56,8 +105,11 @@ __all__ = [
     "expected_made_and_draw",
     "expected_made_and_draw_mc",
     "expected_made_mean_and_histogram_mode",
+    "format_betting_action",
+    "format_betting_history_serial",
     "made_percentile_calibration_stats",
     "made_percentile_vector_1326",
+    "plot_made_distribution",
     "plot_made_percentile_weighted_histogram",
     "hand_number_from_path",
     "load_hand_pluribus",
@@ -65,4 +117,35 @@ __all__ = [
     "multiclass_brier",
     "seat_columns",
     "session_phh_files",
+    "GlobalPriorsSupervisedBundle",
+    "build_player_prediction_dict",
+    "compute_all_posterior_results",
+    "confusion_matrix_counts",
+    "default_global_priors_eval_session_paths",
+    "default_observer_map",
+    "default_supervised_cache_path",
+    "em_and_online_hand_refs",
+    "em_and_online_refs",
+    "empirical_marginal",
+    "find_repo_root",
+    "global_priors_three_head_predictions",
+    "load_global_betas",
+    "load_or_build_global_priors_supervised",
+    "load_player_thetas",
+    "mean_brier",
+    "metric_rows_three_heads",
+    "nll",
+    "online_summary_rows",
+    "predict_probs",
+    "ranks_from_results",
+    "remap_no_bet_labels",
+    "resolve_session_filter_path",
+    "resolve_session_theta_path",
+    "resolve_session_train_path",
+    "row_normalise",
+    "run_filter_sessions_range_evaluation",
+    "softmax_rows",
+    "summarize_metric_rows",
+    "top1_accuracy",
+    "true_hand_nll",
 ]

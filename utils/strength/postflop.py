@@ -28,17 +28,17 @@ def is_straight(values: List[int]) -> Tuple[bool, int]:
     Returns (is_straight, high_card_of_straight)
     Handles wheel: A-2-3-4-5
     """
-    unique = sorted(set(values), reverse=True)
+    unique = sorted(set(values), reverse=True)               # ace-high sort for windows
     if len(unique) < 5:
         return False, 0
 
     for i in range(len(unique) - 4):
         window = unique[i : i + 5]
-        if window[0] - window[4] == 4 and len(window) == 5:
+        if window[0] - window[4] == 4 and len(window) == 5:  # five consecutive ranks
             return True, window[0]
 
     if {14, 5, 4, 3, 2}.issubset(set(unique)):
-        return True, 5
+        return True, 5                                       # wheel: high card is the 5, not ace
 
     return False, 0
 
@@ -57,18 +57,18 @@ def evaluate_5(cards: List[Card]) -> Tuple[int, List[int], str]:
       1 pair
       0 high card
     """
-    values = sorted((c.value for c in cards), reverse=True)
+    values = sorted((c.value for c in cards), reverse=True)              # kickers high→low
     suits = [c.suit for c in cards]
     counts = Counter(values)
 
-    is_flush = len(set(suits)) == 1
+    is_flush = len(set(suits)) == 1                                      # mono-suit 5-card hand
     straight, straight_high = is_straight(values)
 
     if is_flush and straight:
         return 8, [straight_high], "straight_flush"
 
-    count_groups = sorted(counts.items(), key=lambda x: (-x[1], -x[0]))
-    freqs = sorted(counts.values(), reverse=True)
+    count_groups = sorted(counts.items(), key=lambda x: (-x[1], -x[0]))  # freq then rank
+    freqs = sorted(counts.values(), reverse=True)                        # multiset signature
 
     if freqs == [4, 1]:
         quad = count_groups[0][0]
@@ -81,7 +81,7 @@ def evaluate_5(cards: List[Card]) -> Tuple[int, List[int], str]:
         return 6, [trips, pair], "full_house"
 
     if is_flush:
-        return 5, sorted(values, reverse=True), "flush"
+        return 5, sorted(values, reverse=True), "flush"                  # flush kickers
 
     if straight:
         return 4, [straight_high], "straight"
@@ -97,7 +97,7 @@ def evaluate_5(cards: List[Card]) -> Tuple[int, List[int], str]:
         return 2, pairs + [kicker], "two_pair"
 
     if freqs == [2, 1, 1, 1]:
-        pair = max(v for v, c in counts.items() if c == 2)
+        pair = max(v for v, c in counts.items() if c == 2)               # one pair only
         kickers = sorted((v for v, c in counts.items() if c == 1), reverse=True)
         return 1, [pair] + kickers, "pair"
 
@@ -106,9 +106,9 @@ def evaluate_5(cards: List[Card]) -> Tuple[int, List[int], str]:
 
 def best_hand(cards: List[Card]) -> Tuple[int, List[int], str]:
     best = None
-    for combo in combinations(cards, 5):
+    for combo in combinations(cards, 5):  # C(n,5) for Hold'em best 5
         score = evaluate_5(list(combo))
-        if best is None or score > best:
+        if best is None or score > best:  # tuple order matches category+kickers
             best = score
     assert best is not None
     return best
@@ -124,9 +124,9 @@ def board_texture(board: List[Card]) -> dict:
         max(suit_counts.values(), default=0) >= 3
         and len(board) >= 3
         and len(set(suits)) == 1
-    )
-    two_tone = max(suit_counts.values(), default=0) >= 2
-    paired = max(rank_counts.values(), default=0) >= 2
+    )                                                     # three flush cards same suit
+    two_tone = max(suit_counts.values(), default=0) >= 2  # paired suit density
+    paired = max(rank_counts.values(), default=0) >= 2    # board pair or trips
 
     unique_vals = sorted(set(values))
     connectedness = 0
@@ -135,7 +135,7 @@ def board_texture(board: List[Card]) -> dict:
             unique_vals[i + 1] - unique_vals[i]
             for i in range(len(unique_vals) - 1)
         ]
-        connectedness = sum(1 for g in gaps if g <= 2)
+        connectedness = sum(1 for g in gaps if g <= 2)    # near-adjacent rank pairs
 
     return {
         "monotone": monotone,
@@ -150,20 +150,20 @@ def board_texture(board: List[Card]) -> dict:
 def has_flush_draw(hole: List[Card], board: List[Card]) -> bool:
     cards = hole + board
     suit_counts = Counter(c.suit for c in cards)
-    return max(suit_counts.values(), default=0) == 4
+    return max(suit_counts.values(), default=0) == 4  # four to a flush
 
 
 def has_oesd(hole: List[Card], board: List[Card]) -> bool:
     vals = sorted(set(c.value for c in hole + board))
     if 14 in vals:
-        vals = sorted(set(vals + [1]))
+        vals = sorted(set(vals + [1]))                # wheel wrap: treat ace as low too
 
     for start in range(1, 11):
         window = set(range(start, start + 5))
         present = window.intersection(vals)
         if len(present) == 4:
-            run4a = set(range(start, start + 4))
-            run4b = set(range(start + 1, start + 5))
+            run4a = set(range(start, start + 4))      # low four of straight window
+            run4b = set(range(start + 1, start + 5))  # high four
             if run4a.issubset(vals) or run4b.issubset(vals):
                 return True
     return False
@@ -179,7 +179,7 @@ def has_gutshot(hole: List[Card], board: List[Card]) -> bool:
         present = window.intersection(vals)
         if len(present) == 4:
             missing = list(window - present)[0]
-            if missing not in {start, start + 4}:
+            if missing not in {start, start + 4}:  # interior gap → gutshot
                 return True
     return False
 
@@ -188,7 +188,7 @@ def overcards_to_board(hole: List[Card], board: List[Card]) -> int:
     if not board:
         return 0
     board_high = max(c.value for c in board)
-    return sum(1 for c in hole if c.value > board_high)
+    return sum(1 for c in hole if c.value > board_high)  # ace-high overpairs etc.
 
 
 def estimate_outs(hole: List[Card], board: List[Card], hand_name: str) -> int:
@@ -205,7 +205,7 @@ def estimate_outs(hole: List[Card], board: List[Card], hand_name: str) -> int:
         "two_pair",
         "pair",
     }:
-        return 0
+        return 0   # made enough: no simple out heuristic
 
     flush_draw = has_flush_draw(hole, board)
     oesd = has_oesd(hole, board)
@@ -213,14 +213,14 @@ def estimate_outs(hole: List[Card], board: List[Card], hand_name: str) -> int:
     overcards = overcards_to_board(hole, board)
 
     if flush_draw:
-        outs += 9
+        outs += 9  # ~9 clean outs to nut/non-nut flush
     if oesd:
         outs += 8
     elif gutshot:
         outs += 4
 
     if overcards == 2:
-        outs += 6
+        outs += 6  # rough pair-out count for two overs
     elif overcards == 1:
         outs += 3
 
@@ -238,13 +238,13 @@ def made_strength_percentile(hole: List[Card], board: List[Card]) -> float:
         raise ValueError("Hole must have exactly 2 cards.")
     if not (3 <= len(board) <= 5):
         raise ValueError("Board must have 3..5 cards.")
-    board_idx = tuple(sorted(card_to_index(c) for c in board))
+    board_idx = tuple(sorted(card_to_index(c) for c in board))  # packed indices
     key = combo_key_from_indices(card_to_index(hole[0]), card_to_index(hole[1]))
     perc = made_percentile_at_combo_key(board_idx, key)
     if perc is None:
         # Conflict with the board; fall back to 0.5 to match the legacy contract.
         return 0.5
-    return float(perc)
+    return float(perc)                                          # vs uniform random opponent combo
 
 
 def made_percentile_table_for_board(board: List[Card]) -> Dict[str, float]:
@@ -255,36 +255,31 @@ def made_percentile_table_for_board(board: List[Card]) -> Dict[str, float]:
 def draw_strength_from_hand(hole: List[Card], board: List[Card]) -> float:
     """Heuristic draw strength in ``[0, 1]`` from outs; 0 on the river."""
     if len(board) >= 5:
-        return 0.0
+        return 0.0                # river: no cards to come
     score = best_hand(hole + board)
     hand_name = score[2]
     outs = estimate_outs(hole, board, hand_name)
-    return min(1.0, outs / 22.0)
+    return min(1.0, outs / 22.0)  # normalize outs to a soft cap
 
 
-# ---------------------------------------------------------------------------
-# Method A: per-combo board-relative categorical features
-# ---------------------------------------------------------------------------
 
-
-# Index into the rich-feature vector returned by :func:`hand_feature_vector`.
 RICH_FEAT_KEYS: Tuple[str, ...] = (
-    "is_pair_or_better",     # at least one pair using both hole & board
-    "is_top_pair",            # pair using highest board rank
-    "is_over_pair",           # pocket pair higher than every board card
-    "is_middle_pair",         # pair using middle board rank
-    "is_under_pair",          # pocket pair below the lowest board card
-    "is_two_pair_plus",       # two pair or better
-    "is_set_or_better",       # trips or better
-    "is_straight_or_better",  # straight or better
+    "is_pair_or_better",        # at least one pair using both hole & board
+    "is_top_pair",              # pair using highest board rank
+    "is_over_pair",             # pocket pair higher than every board card
+    "is_middle_pair",           # pair using middle board rank
+    "is_under_pair",            # pocket pair below the lowest board card
+    "is_two_pair_plus",         # two pair or better
+    "is_set_or_better",         # trips or better
+    "is_straight_or_better",    # straight or better
     "has_flush_draw",
     "has_oesd",
     "has_gutshot",
-    "is_suited",              # hole cards same suit
-    "is_pocket_pair",         # hole cards same rank
-    "overcard_count",         # 0/1/2 hole cards above the highest board rank
-    "blocks_top_pair",        # hole contains the top-board rank (blocker)
-    "blocks_nut_flush",       # hole contains the Ace of the flush suit (if any)
+    "is_suited",                # hole cards same suit
+    "is_pocket_pair",           # hole cards same rank
+    "overcard_count",           # 0/1/2 hole cards above the highest board rank
+    "blocks_top_pair",          # hole contains the top-board rank (blocker)
+    "blocks_nut_flush",         # hole contains the Ace of the flush suit (if any)
 )
 
 RICH_FEAT_DIM: int = len(RICH_FEAT_KEYS)
@@ -301,13 +296,13 @@ def hand_feature_vector(
     the board, draw type, blockers, etc. Cheap (O(7 cards) per combo).
     """
     if len(hole) != 2 or len(board) < 3:
-        return np.zeros(RICH_FEAT_DIM, dtype=float)
+        return np.zeros(RICH_FEAT_DIM, dtype=float)              # undefined without full board
 
     hole_vals = sorted((c.value for c in hole), reverse=True)
-    board_vals = sorted({c.value for c in board}, reverse=True)
+    board_vals = sorted({c.value for c in board}, reverse=True)  # unique board ranks
     board_high = board_vals[0]
     board_low = board_vals[-1]
-    # "Middle" board rank: use the median of board ranks.
+
     if len(board_vals) >= 3:
         board_mid = board_vals[len(board_vals) // 2]
     elif len(board_vals) == 2:
@@ -317,7 +312,7 @@ def hand_feature_vector(
     board_rank_set = set(board_vals)
 
     cards = hole + board
-    cat = hand_category([card_to_index(c) for c in cards])
+    cat = hand_category([card_to_index(c) for c in cards])       # fast_eval category
 
     is_pair_or_better = cat >= 1
     is_two_pair_plus = cat >= 2
@@ -354,7 +349,7 @@ def hand_feature_vector(
 
     has_fd = has_flush_draw(hole, board)
     has_oe = has_oesd(hole, board)
-    has_gut = has_gutshot(hole, board) and not has_oe
+    has_gut = has_gutshot(hole, board) and not has_oe            # avoid double-counting straight outs
 
     overcards = overcards_to_board(hole, board)
 
@@ -366,9 +361,9 @@ def hand_feature_vector(
     blocks_nut_fd = False
     if suit_counts:
         dominant_suit, dom_count = suit_counts.most_common(1)[0]
-        if dom_count >= 2:
+        if dom_count >= 2:                                       # flush possible on this texture
             for c in hole:
-                if c.suit == dominant_suit and c.value == 14:
+                if c.suit == dominant_suit and c.value == 14:    # A of flush suit
                     blocks_nut_fd = True
                     break
 
@@ -414,11 +409,11 @@ def combo_postflop_features_for_board(
     board_idx = tuple(card_to_index(c) for c in board)
     made_tbl = made_percentile_by_combo_key(board_idx)
     if len(board) == 5:
-        equity_tbl = made_tbl
+        equity_tbl = made_tbl                                           # showdown: equity == made percentile
     else:
         equity_tbl = rollout_equity_by_combo_key(
             board_idx,
-            mc_samples=equity_mc_samples if len(board) == 3 else None,
+            mc_samples=equity_mc_samples if len(board) == 3 else None,  # MC on flop only
             rng=equity_rng,
         )
 
@@ -430,7 +425,7 @@ def combo_postflop_features_for_board(
         hole = parse_cards([h0, h1])
         rich = hand_feature_vector(hole, board)
         draw = draw_strength_from_hand(hole, board)
-        equity = float(equity_tbl.get(key, made))
+        equity = float(equity_tbl.get(key, made))                       # fallback if key missing
         out[key] = {
             "made": float(made),
             "draw": float(draw),
@@ -441,6 +436,9 @@ def combo_postflop_features_for_board(
 
 
 def strength_bucket_from_percentiles(made_p: float, draw_s: float) -> str:
+    """
+    Completely legacy but useful for interpretability and classifying hands.
+    """
     if made_p >= 0.93:
         return "nuts/near-nuts"
     if made_p >= 0.80:
@@ -450,7 +448,7 @@ def strength_bucket_from_percentiles(made_p: float, draw_s: float) -> str:
     if made_p >= 0.45:
         return "weak made"
     if draw_s >= 0.45:
-        return "strong draw"
+        return "strong draw"  # outs-based draw score
     if draw_s >= 0.18:
         return "weak draw"
     return "air"
@@ -460,13 +458,13 @@ def cards_str_to_list(cards_str: str) -> List[str]:
     cards_str = cards_str.strip()
     if len(cards_str) % 2 != 0:
         raise ValueError(f"Invalid cards string: {cards_str}")
-    return list(cards_str[i : i + 2] for i in range(0, len(cards_str), 2))
+    return list(cards_str[i : i + 2] for i in range(0, len(cards_str), 2))  # 2-char tokens
 
 
 def poker_hand_mapper(hole_cards, board_cards) -> dict:
     """Map hole + board to made/draw features and a legacy strength bucket."""
     if isinstance(hole_cards, str):
-        hole_cards = cards_str_to_list(hole_cards)
+        hole_cards = cards_str_to_list(hole_cards)  # "AhKh" → ["Ah","Kh"]
     if isinstance(board_cards, str):
         board_cards = cards_str_to_list(board_cards)
 

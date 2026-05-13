@@ -11,7 +11,8 @@ from utils.eval.brier import (
     collapse_combo_distribution_to_169,
     multiclass_brier,
 )
-from utils.filter import all_combo_keys, combo_key
+from utils.filter import combo_key
+from utils.strength.fast_eval import all_combo_keys_fast
 from utils.parse import parse_card
 from utils.strength.preflop import all_169_classes, get_equivalence_class
 
@@ -51,7 +52,7 @@ class TestPreflop169From1326(unittest.TestCase):
 
 class TestBrier1326(unittest.TestCase):
     def test_combo_key_order(self) -> None:
-        keys = all_combo_keys()
+        keys = list(all_combo_keys_fast())
         k0 = keys[0]
         dist = {k0: 1.0}
         self.assertAlmostEqual(brier_postflop1326(dist, keys, k0), 0.0)

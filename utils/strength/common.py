@@ -8,5 +8,5 @@ from enum import Enum
 class StrengthMode(Enum):
     """Which strength feature family applies."""
 
-    PREFLOP = "preflop"
-    POSTFLOP = "postflop"
+    PREFLOP = "preflop"  # abstract 169-class strength before community cards
+    POSTFLOP = "postflop"  # board-aware strength after at least the flop

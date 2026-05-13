@@ -1,5 +1,7 @@
 """Shared helpers for train, find_theta, tests, and runner-style pipelines.
 
+Consolidates the former repo-root ``pipeline_common`` and ``priors_artifacts`` modules.
+
 This module is the **data plane** between parsed Pluribus ``.phh`` hands and
 the statistical objects used elsewhere:
 
@@ -26,11 +28,11 @@ from concurrent.futures import ProcessPoolExecutor, as_completed
 from dataclasses import dataclass
 from collections import defaultdict
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple
 
 import numpy as np
 
-REPO_ROOT = Path(__file__).resolve().parent
+REPO_ROOT = Path(__file__).resolve().parents[1]
 
 LOG_PC = logging.getLogger(__name__)
 for path in (str(REPO_ROOT), str(REPO_ROOT / "utils")):
@@ -48,19 +50,25 @@ from utils.postflop_runner_bridge import (
 from utils.action.postflop import (
     FOLD,
     PHI_DIM,
+    PostflopActionModel,
     feature_vector,
     train_baseline_facing_bet,
     train_baseline_no_bet,
 )
 from utils.action.preflop import (
     PREFLOP_PHI_DIM,
+    PreflopActionModel,
     canonical_preflop_action,
     preflop_feature_vector,
     state_key_from_parse_state,
     train_baseline_preflop,
 )
+from utils.prior.postflop import PostflopPrior
+from utils.prior.preflop import PreflopPrior
 from utils.parse import parse_card
 from utils.strength.preflop import get_equivalence_class
+
+from .models import PREFLOP_PRIOR_FLOOR
 
 
 def preflop_phi_column_labels() -> List[str]:
@@ -526,6 +534,19 @@ def load_json(path: Path) -> object:
     return json.loads(Path(path).expanduser().resolve().read_text(encoding="utf-8"))
 
 
+def load_global_priors(path: Path) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Read ``beta_preflop``, ``beta_facing``, ``beta_no_bet`` arrays from a global priors JSON file."""
+    raw = load_json(path)
+    if not isinstance(raw, dict):
+        raise ValueError("global priors JSON must be an object")
+    pre = raw.get("preflop") or {}
+    post = raw.get("postflop") or {}
+    beta_preflop = np.asarray(pre["beta_preflop"], dtype=float)
+    beta_facing = np.asarray(post["beta_facing"], dtype=float)
+    beta_no_bet = np.asarray(post["beta_no_bet"], dtype=float)
+    return beta_preflop, beta_facing, beta_no_bet
+
+
 def read_session_names_file(path: str | Path) -> List[str]:
     """One session directory name per non-empty line (e.g. ``30`` → ``pluribus/30``)."""
     p = Path(path).expanduser().resolve()
@@ -692,3 +713,37 @@ def gather_postflop_bundles_for_target_player(
                 }
             )
     return bundles, metas
+
+
+def preflop_postflop_priors_for_target(
+    target: str,
+    global_priors_path: Path,
+    players_block: Mapping[str, Any],
+    *,
+    preflop_floor: float = PREFLOP_PRIOR_FLOOR,
+    postflop_floor: float = 1e-6,
+) -> Tuple[PreflopActionModel, PostflopActionModel]:
+    """Population ``beta`` from ``global_priors_path``; per-target ``theta_*`` from ``players_block``."""
+    beta_preflop, beta_facing, beta_no_bet = load_global_priors(Path(global_priors_path))
+    if target not in players_block:
+        raise ValueError(
+            f"Target {target!r} missing from player θ JSON (not seen during EM?). "
+            f"Keys: {sorted(players_block.keys())}"
+        )
+    entry = players_block[target]
+    tp = entry["theta_pre"]
+    ts = entry["theta_post"]
+    return (
+        PreflopActionModel(
+            PreflopPrior(floor=preflop_floor, beta_preflop=beta_preflop),
+            tuple(float(x) for x in tp),
+        ),
+        PostflopActionModel(
+            PostflopPrior(
+                floor=postflop_floor,
+                beta_facing=beta_facing,
+                beta_no_bet=beta_no_bet,
+            ),
+            tuple(float(x) for x in ts),
+        ),
+    )

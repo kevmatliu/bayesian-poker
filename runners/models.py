@@ -1,4 +1,4 @@
-"""Dataclasses and small config types shared by ``runners`` CLIs and ``priors_artifacts``."""
+"""Dataclasses and small config types shared by ``runners`` CLIs and :mod:`runners.common`."""
 
 from __future__ import annotations
 

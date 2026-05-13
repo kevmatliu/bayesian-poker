@@ -4,6 +4,16 @@ E-step: :func:`e_step_postflop_bundle` updates ``q(c)`` with batched
 :meth:`~utils.action.postflop.PostflopActionModel.action_probs_matrix` per street.
 M-step: :func:`m_step_theta_post_gradient_ascent_bundles` does tilt-parameter ascent
 with optional hand-level minibatches (same scaling contract as preflop).
+
+
+Learning the theta_post tilt.
+
+E-step: e_step_preflop_bundle which updates q(c) with batched PostflopActionModel.action_probs_matrix per street.
+
+M_step: m_step_theta_post_gradient_ascent_bundles, using a gradient ascent-modified 
+version of EM due to the high-cost of the computational methods to compute the M-step. 
+
+Instead of calculating M exactly, we take a gradient step toward the EM objective.
 """
 
 from __future__ import annotations
@@ -53,7 +63,18 @@ class PostflopEMTimestep:
 
 @dataclass(frozen=True)
 class PostflopEMHandBundle:
-    """Postflop EM hand: 1,326 (sparse) combo prior + target decisions (mirrors PreflopEMHandBundle)."""
+    """All EM inputs for one Pluribus hand when inferring the target's latent combo, c.
+
+    What: Same bundling idea as Preflop, but the latent state is a concrete two-card **combo key** 
+    (1,326 universe, usually stored sparsely). Starting support uses one observer's known hole cards.
+    Each :class:`PostflopEMTimestep` records one target postflop action plus the
+    per-combo feature rows at that decision point, so the likelihood
+    P(a_t | x_t(c), \theta) can be evaluated for every combo still
+    alive on the board.
+
+    Rationale: Coupling the decisions with the initial range, allowing us to stack
+    the gradients more easily.
+    """
 
     decisions: Tuple[PostflopEMTimestep, ...]
     initial_combo_range: Dict[str, float]
@@ -64,57 +85,55 @@ def e_step_combo_posterior(
     prior: PostflopActionModel,
 ) -> Dict[str, float]:
     """q(c) ∝ exp(log pi(c) + sum_t log P_theta(a_t | x_t(c)))."""
-    log_w: Dict[str, float] = {}
-    for obs in observations:
-        logp = obs.log_prior_range
-        for feat, action in obs.decisions:
+    log_w: Dict[str, float] = {}                                   # unnormalized log weights per hole-card combo
+    for obs in observations:                                       # typically all 1326 or a sparse subset
+        logp = obs.log_prior_range                                 # log pi_0(c) from range construction
+        for feat, action in obs.decisions:                         # supervised-like trajectory for this combo
             probs = prior.action_probs(feat)
-            logp += math.log(max(probs.get(action, 0.0), 1e-300))
+            logp += math.log(max(probs.get(action, 0.0), 1e-300))  # avoid log(0) underflow (pls don't penalize :( )
         log_w[obs.combo_key] = logp
-    return normalize_log_weights(log_w)
+    return normalize_log_weights(log_w)                            # softmax over combos → q(c)
 
 
 def e_step_postflop_bundle(
     bundle: PostflopEMHandBundle,
     prior: PostflopActionModel,
 ) -> Dict[str, float]:
-    """``q(c) ∝ pi_0(c) * prod_t P_theta(a_t | x_t(c))``.
+    """``q(c) propto pi_0(c) * prod_t P_theta(a_t | x_t(c))``.
 
-    Batched across combos using :meth:`PostflopActionModel.action_probs_matrix`
-    (Method D): for each timestep we evaluate every combo's likelihood in
-    one matmul instead of one Python softmax per combo.
+    Batched across combos using `PostflopActionModel.action_probs_matrix`.
+    For each timestep we evaluate every combo's likelihood in one matmul instead of one Python softmax per combo.
     """
-    initial = bundle.initial_combo_range
+    initial = bundle.initial_combo_range                                     # sparse prior support over combo strings
     log_q: Dict[str, float] = {
         combo: math.log(p0) for combo, p0 in initial.items() if p0 > 0.0
-    }
+    }                                                                        # start log q at log pi_0 only
     if not log_q:
         raise ValueError("E-step: empty initial combo range")
-    alive = set(log_q.keys())
+    alive = set(log_q.keys())                                                # combos still consistent with board / blockers so far
 
-    for step in bundle.decisions:
-        feat_map = dict(step.features_by_combo)
-        # Combos that don't appear at this step (e.g. now blocked by a
-        # new community card) drop out of ``alive``.
-        live = [c for c in alive if c in feat_map]
+    for step in bundle.decisions:                                            # each street decision for the target seat
+        feat_map = dict(step.features_by_combo)                              
+        # keeping track of the ``live`` combos that survive each street. 
+        live = [c for c in alive if c in feat_map]                           # intersect prior support with this timestep
         if not live:
             raise ValueError(
                 "E-step: every combo dropped out before all decisions consumed"
             )
-        phi = np.stack([feature_vector(feat_map[c]) for c in live], axis=0)
+        phi = np.stack([feature_vector(feat_map[c]) for c in live], axis=0)  # (N, PHI_DIM) batch
         facing = np.fromiter(
             (feat_map[c].facing_bet for c in live),
             dtype=bool,
             count=len(live),
-        )
-        log_probs = prior.action_log_probs_matrix(phi, facing)
-        log_pa = log_probs[:, int(step.action)]
+        )                                                                    # row mask: facing-bet vs no-bet softmax head
+        log_probs = prior.action_log_probs_matrix(phi, facing)               # batched log softmax rows
+        log_pa = log_probs[:, int(step.action)]                              # column for observed action only
         for combo, lp in zip(live, log_pa):
-            log_q[combo] += float(lp)
+            log_q[combo] += float(lp)                                        # accumulate log P(a_t | x_t(c), theta)
         # Drop combos that fell off this step.
-        alive = set(live)
+        alive = set(live)                                                    # shrink support to combos that existed at this node
 
-    log_q = {c: v for c, v in log_q.items() if c in alive}
+    log_q = {c: v for c, v in log_q.items() if c in alive}                   # discard dead keys for safety
     if not log_q:
         raise ValueError("E-step: no combo survived to the final decision")
     return normalize_log_weights(log_q)
@@ -127,24 +146,31 @@ def postflop_theta_gradient(
     *,
     l2: float = 0.25,
 ) -> np.ndarray:
-    grad = np.zeros(3, dtype=float)
-    theta_vec = prior_template.theta_vec
+    """
+    Gradient calculation for theta_post EM M-step.
 
-    for hand_obs, qmap in zip(hands, q_by_hand):
-        for obs in hand_obs:
-            w = float(qmap.get(obs.combo_key, 0.0))
+    Note that we regularize the gradient with an L2 penalty, effectively giving a Gaussian prior on theta_post.
+    Helps to stabilize the gradient ascent updates.
+    """    
+
+    grad = np.zeros(3, dtype=float)                                      # tilt gradient in R^3
+    theta_vec = prior_template.theta_vec                                 # current theta for L2 anchor
+
+    for hand_obs, qmap in zip(hands, q_by_hand):                         # one list of combo-rows per hand
+        for obs in hand_obs:                                             # each combo's feature trajectory
+            w = float(qmap.get(obs.combo_key, 0.0))                      # posterior weight q(c)
             if w <= 0.0:
                 continue
-            for feat, action in obs.decisions:
-                utilities = prior_template.action_utility_vectors(feat)
-                p_theta = prior_template.action_probs(feat)
-                legal = prior_template.legal_actions(feat)
-                expected_u = np.zeros(3, dtype=float)
+            for feat, action in obs.decisions:                           # contrastive term per timestep
+                utilities = prior_template.action_utility_vectors(feat)  # centered behavior vectors
+                p_theta = prior_template.action_probs(feat)              # model softmax at theta
+                legal = prior_template.legal_actions(feat)               # {0,1,2} subset depending on node
+                expected_u = np.zeros(3, dtype=float)                    # E_p[u] under model
                 for b in legal:
                     expected_u += float(p_theta[b]) * utilities[b]
-                grad += w * (utilities[action] - expected_u)
+                grad += w * (utilities[action] - expected_u)             # policy-gradient style update
 
-    grad -= l2 * theta_vec
+    grad -= l2 * theta_vec                                               # 
     return grad
 
 
@@ -154,45 +180,39 @@ def postflop_theta_gradient_bundles(
     q_by_hand: Sequence[Mapping[str, float]],
     *,
     l2: float = 0.25,
-    bundle_indices: Optional[Sequence[int]] = None,
+    bundle_indices: Optional[Sequence[int]] = None,     # for minibatch M-step; if None, use all bundles for full-batch gradient
     apply_l2: bool = True,
 ) -> np.ndarray:
     """Batched M-step gradient.
 
-    For each timestep we materialise the live combos as a single
-    ``(N, PHI_DIM)`` feature matrix and call
-    :meth:`PostflopActionModel.action_probs_matrix` once. The gradient
-    contribution simplifies to ``w * (e_action - p_theta)`` after
-    cancelling the ``-E_p[u]`` drift term across actions, so we can
-    accumulate it with a single weighted sum per row (Method D).
-
-    When ``bundle_indices`` is set, only those hand-bundle indices contribute
-    (for minibatch M-step); use ``apply_l2=False`` and apply L2 outside when
-    scaling stochastic gradients.
+    For each timestep, we group live combos as a single ``(N, PHI_DIM)`` feature matrix and 
+    call `action_probs_matrix` once. The gradient contribution simplifies to 
+    ``w * (e_action - p_theta)`` after cancelling the ``-E_p[u]`` drift term across actions, 
+    so we can accumulate it with a single weighted sum per row.
     """
-    grad = np.zeros(3, dtype=float)
+    grad = np.zeros(3, dtype=float)                                    # accumulates full-data or minibatch gradient
     theta_vec = prior_template.theta_vec
-    eye = np.eye(3, dtype=float)
+    eye = np.eye(3, dtype=float)                                       # one-hot rows for closed-form utility difference
 
     if bundle_indices is None:
-        index_iter = range(len(bundles))
+        index_iter = range(len(bundles))                               # all hands
     else:
-        index_iter = bundle_indices
+        index_iter = bundle_indices                                    # minibatch subset only
 
     for bi in index_iter:
         bundle = bundles[int(bi)]
         qmap = q_by_hand[int(bi)]
         if not qmap:
             continue
-        for step in bundle.decisions:
+        for step in bundle.decisions:                                  # one matrix multiply covers all live combos
             feat_map = dict(step.features_by_combo)
-            action = int(step.action)
+            action = int(step.action)                                  # global action index (fold/call/raise)
             live: List[Tuple[str, float, PostflopFeatures]] = []
             for combo, w in qmap.items():
                 wf = float(w)
                 if wf <= 0.0:
                     continue
-                feat = feat_map.get(combo)
+                feat = feat_map.get(combo)                             # None if combo blocked this street
                 if feat is None:
                     continue
                 live.append((combo, wf, feat))
@@ -204,14 +224,14 @@ def postflop_theta_gradient_bundles(
                 dtype=bool,
                 count=len(live),
             )
-            weights = np.asarray([t[1] for t in live], dtype=float)
-            p_theta = prior_template.action_probs_matrix(phi, facing)  # (N, 3)
+            weights = np.asarray([t[1] for t in live], dtype=float)    # q(c) per row
+            p_theta = prior_template.action_probs_matrix(phi, facing)  # (N, 3) softmax rows
             # u(action) - E_p[u] = e_action - p_theta
-            diff = eye[action][None, :] - p_theta  # (N, 3)
-            grad += (weights[:, None] * diff).sum(axis=0)
+            diff = eye[action][None, :] - p_theta                      # (N, 3) contrast per combo
+            grad += (weights[:, None] * diff).sum(axis=0)              # sum weighted rows → dQ/dtheta
 
     if apply_l2:
-        grad -= l2 * theta_vec
+        grad -= l2 * theta_vec                                         # skipped inside minibatch; caller adds scaled L2
     return grad
 
 
@@ -228,16 +248,23 @@ def m_step_theta_post_gradient_ascent(
     center_each_step: bool = True,
     grad_norm_tol: float = M_STEP_GRAD_NORM_TOL,
 ) -> Tuple[np.ndarray, int]:
+    """
+    M-step for theta_post using gradient ascent on the expected complete-data log-likelihood.
+
+    We use gradient ascent instead of exact maximization due to the complexity of the M-step objective, which involves a sum over all hands and combos.
+    The gradient is computed in `postflop_theta_gradient`, which implements a policy-gradient style update based on the current posterior weights q(c) and the model's action probabilities.
+    """
+
     theta = np.asarray(theta_init, dtype=float).copy()
-    used = steps
+    used = steps                                                    # actual iterations if early-stopped
 
     for step_i in range(steps):
         live = PostflopActionModel(
             beta_source,
             tuple(float(x) for x in theta),
-        )
-        g = postflop_theta_gradient(live, hands, q_by_hand, l2=l2)
-        gn = float(np.linalg.norm(g))
+        )                                                           # rebuild so softmax uses fresh theta each step
+        g = postflop_theta_gradient(live, hands, q_by_hand, l2=l2)  # full-batch grad
+        gn = float(np.linalg.norm(g))                               # Frobenius norm for stopping
         if gn < grad_norm_tol:
             used = step_i + 1
             LOG.info(
@@ -248,10 +275,10 @@ def m_step_theta_post_gradient_ascent(
                 grad_norm_tol,
             )
             break
-        theta += lr * g
+        theta += lr * g                                             # ascent on expected complete-data log-likelihood
         if center_each_step:
-            theta -= float(np.mean(theta))
-        theta = np.clip(theta, -clip, clip)
+            theta -= float(np.mean(theta))                          # remove gauge / improve conditioning
+        theta = np.clip(theta, -clip, clip)                         # keep logits perturbation bounded
 
     return theta, used
 
@@ -270,17 +297,21 @@ def m_step_theta_post_gradient_ascent_bundles(
     outer_1based: int = 1,
     num_outer_iterations: int = 1,
     grad_norm_tol: float = M_STEP_GRAD_NORM_TOL,
-    m_batch_size: int = POSTFLOP_M_BATCH_SIZE,
+    m_batch_size: int = POSTFLOP_M_BATCH_SIZE,      # mini-batch size for stochastic gradient ascent; 0 or negative means full batch
     m_step_seed: Optional[int] = None,
 ) -> Tuple[np.ndarray, int]:
+    """
+    Mini-batch method for M-step for theta_post using gradient ascent on the expected complete-data log-likelihood
+    """
+
     theta = np.asarray(theta_init, dtype=float).copy()
-    log_every = max(1, steps // 10)
+    log_every = max(1, steps // 10)                                              # ~10 progress logs per full run
     t_m0 = time.perf_counter()
     used = steps
 
     n_hands = len(bundles)
     rng = np.random.default_rng(m_step_seed)
-    use_minibatch = m_batch_size > 0 and m_batch_size < n_hands
+    use_minibatch = m_batch_size > 0 and m_batch_size < n_hands                  # hand-level SGD if true
 
     for step_i in range(steps):
         live = PostflopActionModel(
@@ -288,7 +319,7 @@ def m_step_theta_post_gradient_ascent_bundles(
             tuple(float(x) for x in theta),
         )
         if use_minibatch:
-            batch_ix, scale, _ = minibatch_plan(n_hands, m_batch_size, rng)
+            batch_ix, scale, _ = minibatch_plan(n_hands, m_batch_size, rng)      # scale = n/batch
             g_data = postflop_theta_gradient_bundles(
                 live,
                 bundles,
@@ -296,8 +327,8 @@ def m_step_theta_post_gradient_ascent_bundles(
                 l2=l2,
                 bundle_indices=batch_ix,
                 apply_l2=False,
-            )
-            g = scale * g_data - l2 * live.theta_vec
+            )                                                                    # L2 applied manually next line for correct scaling
+            g = scale * g_data - l2 * live.theta_vec                             # unbiased noisy grad + full L2
         else:
             g = postflop_theta_gradient_bundles(live, bundles, q_by_hand, l2=l2)
         gn = float(np.linalg.norm(g))
@@ -318,11 +349,13 @@ def m_step_theta_post_gradient_ascent_bundles(
                 time.perf_counter() - t_m0,
             )
             break
+
         theta += lr * g
         if center_each_step:
             theta -= float(np.mean(theta))
         theta = np.clip(theta, -clip, clip)
-        if step_i == 0 or step_i == steps - 1 or (step_i + 1) % log_every == 0:
+
+        if step_i == 0 or step_i == steps - 1 or (step_i + 1) % log_every == 0:  # periodic trace logging
             LOG.info(
                 "Postflop EM M-step | outer %d/%d | grad %d/%d | "
                 "theta=[%.5f, %.5f, %.5f] | |grad|=%.5f | elapsed_s=%.2f",
@@ -360,11 +393,15 @@ def run_postflop_theta_em(
 ) -> Tuple[np.ndarray, List[Dict[str, float]]]:
     """Outer EM for postflop tendency ``theta_post`` with frozen ``beta`` matrices.
 
-    For each outer iteration: E-step per hand-bundle via
-    :func:`e_step_postflop_bundle` (batched combo likelihoods), then M-step via
-    :func:`m_step_theta_post_gradient_ascent_bundles`. ``history_hook`` can
-    record per-hand ESS / max ``q`` for diagnostics; large runs subsample
-    ``postflop_e_step`` events to limit disk IO.
+    We classify the EM steps into ``outer`` iterations and ``inner`` gradient steps.
+    The E-step is exact and batched per hand-bundle, but the M-step is approximate via gradient ascent.
+    The M-step runs to completion each EM iteration, but it may early-stop based on the gradient norm.
+
+    For each outer iteration: E-step updates ``q(c)`` for each hand via
+    - e_step_postflop_bundle, 
+    - M_step updates through m_step_theta_post_gradient_ascent_bundle
+    
+    history_hook records the progress of the EM run. 
 
     Returns:
         Tuple of ``(theta_post array shape (3,), list of per-hand posterior dicts
@@ -374,13 +411,13 @@ def run_postflop_theta_em(
         np.zeros(3, dtype=float)
         if theta_init is None
         else np.asarray(theta_init, dtype=float).copy()
-    )
+    )                                                                                 # default zero tilt unless warm-started
 
     last_per_hand: List[Dict[str, float]] = []
-    bundles_list = list(bundles_by_hand)
+    bundles_list = list(bundles_by_hand)                                              # materialize for indexing + repeated passes
     n_h = len(bundles_list)
 
-    for outer in range(num_em_iters):
+    for outer in range(num_em_iters):                                                 # outer EM: alternate E on q(c), M on theta
         t0 = time.perf_counter()
         LOG.info(
             "Postflop EM outer %d/%d | %d hand-bundles | m_steps=%d lr=%g l2=%g",
@@ -410,34 +447,36 @@ def run_postflop_theta_em(
             floor=prior_floor,
             beta_facing=beta_facing,
             beta_no_bet=beta_no_bet,
-        )
+        )                                                                             # frozen population logits for this run
         prior = PostflopActionModel(
             base_prior,
             tuple(float(x) for x in theta),
-        )
+        )                                                                             # softmax head includes both beta and theta
 
         last_per_hand = []
         prog = max(1, n_h // 20) if n_h > 20 else 1
         pf_stride = 1
         if history_hook is not None and n_h > 2000:
-            pf_stride = max(1, n_h // 2000)
+            pf_stride = max(1, n_h // 2000)                                           # logging the jsonl events on huge batches
             LOG.info(
                 "Postflop EM | jsonl subsample: postflop_e_step every %d hand(s) (n_hands=%d)",
                 pf_stride,
                 n_h,
             )
-        t_e0 = time.perf_counter()
+
+        t_e0 = time.perf_counter()                      # measuring wall-time
         for hi, bundle in enumerate(bundles_list):
-            q = e_step_postflop_bundle(bundle, prior)
-            last_per_hand.append(dict(q))
+            q = e_step_postflop_bundle(bundle, prior)                                 # batched combo posterior
+            last_per_hand.append(dict(q))                                             # copy so later M-step sees fixed E-step output
+
             if history_hook is not None and (
                 hi == 0 or hi == n_h - 1 or hi % pf_stride == 0
-            ):
+            ):                                                                        # always log first/last; stride interior
                 meta: Dict[str, Any] = {}
                 if hand_meta is not None and hi < len(hand_meta):
                     meta = dict(hand_meta[hi])
                 qv = list(q.values())
-                ess = effective_sample_size(qv)
+                ess = effective_sample_size(qv)                                       # scalar concentration per hand
                 history_hook(
                     {
                         "kind": "postflop_e_step",
@@ -451,6 +490,7 @@ def run_postflop_theta_em(
                         **meta,
                     }
                 )
+
             if hi == 0 or hi == n_h - 1 or (hi + 1) % prog == 0:
                 LOG.info(
                     "Postflop EM E-step | outer %d/%d | hand %d/%d | elapsed_s=%.2f",
@@ -461,7 +501,7 @@ def run_postflop_theta_em(
                     time.perf_counter() - t_e0,
                 )
 
-        max_ess = max_effective_sample_size(last_per_hand) if last_per_hand else 0.0
+        max_ess = max_effective_sample_size(last_per_hand) if last_per_hand else 0.0  # worst-case spread across hands
         LOG.info(
             "Postflop EM E-step done | outer %d/%d | wall_s=%.2f | max_ess≈%.2f",
             outer + 1,
@@ -487,7 +527,7 @@ def run_postflop_theta_em(
             "full"
             if m_batch_size <= 0 or m_batch_size >= nh_m
             else f"{min(m_batch_size, nh_m)}/{nh_m} hands/step"
-        )
+        )                                                                             # minibatch label for logs
         LOG.info(
             "Postflop EM M-step start | outer %d/%d | %d gradient steps | batch=%s",
             outer + 1,
@@ -510,7 +550,7 @@ def run_postflop_theta_em(
             grad_norm_tol=m_grad_norm_tol,
             m_batch_size=m_batch_size,
             m_step_seed=m_step_seed,
-        )
+        )                                                                             # in-place ascent on theta_post with optional minibatches
 
         if history_hook is not None:
             history_hook(
@@ -548,17 +588,14 @@ def single_hand_em_gradient_sample(
     *,
     prior_floor: float = 0.0,
 ) -> np.ndarray:
-    """Debug helper: M-step gradient for ``theta_post`` assuming **uniform** ``q`` over combos.
-
-    Wraps :func:`postflop_theta_gradient` with synthetic equal weights. Not
-    used in production EM (which uses :func:`e_step_combo_posterior` /
-    :func:`e_step_postflop_bundle`), but handy for sanity checks.
     """
-    hands = [list(observations)]
+    Debug helper: M-step gradient for ``theta_post`` assuming uniform ``q`` over combos.
+    """
+    hands = [list(observations)]                                                    # wrap as one synthetic "hand" for shared gradient code
     n = len(observations)
     if n == 0:
         return np.zeros(3, dtype=float)
-    w = 1.0 / n
+    w = 1.0 / n                                                                     # uniform q(c) by construction
     qmaps = [{obs.combo_key: w for obs in observations}]
-    model = PostflopActionModel(PostflopPrior(floor=prior_floor), (0.0, 0.0, 0.0))
-    return postflop_theta_gradient(model, hands, qmaps, l2=0.0)
+    model = PostflopActionModel(PostflopPrior(floor=prior_floor), (0.0, 0.0, 0.0))  # zero tilt: pure baseline pull
+    return postflop_theta_gradient(model, hands, qmaps, l2=0.0)                     # no shrinkage in debug helper

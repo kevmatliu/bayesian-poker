@@ -22,23 +22,26 @@ class ActionPhase(Enum):
 
 
 def softmax_dict_float(scores: Mapping[int, float], floor: float = 0.0) -> Dict[int, float]:
-    """Stable softmax over int-keyed logits with optional additive floor smoothing."""
+    """Stable softmax over int-keyed logits with optional additive floor smoothing.
+    
+    Treat floor as a uniform mixing weight to promote numerical stability.
+    """
     if not scores:
         raise ValueError("empty scores")
-    actions = list(scores.keys())
-    vals = np.array([scores[a] for a in actions], dtype=float)
-    m = float(np.max(vals))
+    actions = list(scores.keys())                                       # fix iteration order for parallel arrays
+    vals = np.array([scores[a] for a in actions], dtype=float)          # stack logits into a vector
+    m = float(np.max(vals))                                             # log-sum-exp shift for stability
     w = np.exp(vals - m)
     s = float(np.sum(w))
-    probs = {a: float(wi / s) for a, wi in zip(actions, w)}
+    probs = {a: float(wi / s) for a, wi in zip(actions, w)}             # normalize to a proper pmf
     if floor <= 0:
         return probs
     n = len(probs)
     if floor * n >= 1.0:
         raise ValueError("floor too large")
-    out = {a: (1.0 - floor * n) * p + floor for a, p in probs.items()}
-    tot = sum(out.values())
-    return {a: p / tot for a, p in out.items()}
+    out = {a: (1.0 - floor * n) * p + floor for a, p in probs.items()}  # mix toward uniform
+    tot = sum(out.values())                                             # renormalize after floor injection
+    return {a: p / tot for a, p in out.items()}                         # project onto simplex after floor
 
 
 def dot3(theta: Sequence[float], u: UtilityVector) -> float:
@@ -62,9 +65,9 @@ def tendency_deviation_vector(
     ``log p_base`` in :class:`utils.action.preflop.PreflopActionModel`.
     """
     return (
-        float(candidate_action == fold) - float(p_base[fold]),
-        float(candidate_action == call) - float(p_base[call]),
-        float(candidate_action == raise_) - float(p_base[raise_]),
+        float(candidate_action == fold) - float(p_base[fold]),      # centered fold indicator
+        float(candidate_action == call) - float(p_base[call]),      # centered call/check indicator
+        float(candidate_action == raise_) - float(p_base[raise_]),  # centered raise indicator
     )
 
 

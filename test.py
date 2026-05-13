@@ -11,7 +11,7 @@ import sys
 from pathlib import Path
 from typing import Any, Dict, List, MutableMapping, Optional, Sequence, Tuple
 
-from pipeline_common import (
+from runners.common import (
     HandRef,
     dump_json,
     flatten_hands,

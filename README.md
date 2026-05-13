@@ -25,9 +25,8 @@ Supervised training of `beta` uses only rows where the actor’s hole cards are 
 | `runners/find_theta.py` | Load global priors, build EM bundles, run preflop + postflop EM per player. |
 | `runners/filter_sessions.py` | Batch combo-range filtering over many sessions (`command_filter.sh`). |
 | `runners/execute.py` | Shared preflop/postflop filter + EM helpers used by `filter_sessions`. |
-| `runners/models.py` | Dataclasses / config shared by `execute` and `priors_artifacts`. |
-| `pipeline_common.py` | Hand loading, session expansion, supervised row collection, EM bundle gathering, splits. |
-| `priors_artifacts.py` | Build `PreflopPrior` / `PostflopPrior` from JSON artifacts. |
+| `runners/models.py` | Dataclasses / config shared by `execute` and `runners.common`. |
+| `runners/common.py` | Hand loading, session expansion, supervised row collection, EM bundle gathering, splits, and JSON prior helpers. |
 | `utils/parse.py` | `.phh` → `Hand` object (states, actions, hole cards). |
 | `utils/prior/preflop.py` | Preflop `StateKey`, `preflop_feature_vector`, `PreflopPrior`, baseline training. |
 | `utils/prior/postflop.py` | `PostflopFeatures`, `PostflopPrior`, vectorized `action_probs_matrix` (Method D). |
@@ -41,7 +40,7 @@ Supervised training of `beta` uses only rows where the actor’s hole cards are 
 ## Data layout
 
 - **Session folder**: contains numbered `.phh` files (one hand per file).
-- **Pluribus root**: directory whose *children* are session folders (each child holds `.phh` files). `pipeline_common.expand_data_path` distinguishes a single session from a root.
+- **Pluribus root**: directory whose *children* are session folders (each child holds `.phh` files). `runners.common.expand_data_path` distinguishes a single session from a root.
 
 ## Commands
 

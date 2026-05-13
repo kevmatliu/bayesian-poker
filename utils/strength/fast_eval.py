@@ -14,9 +14,11 @@ flop (board = 3 cards) it costs O(1326) hand evaluations + one
 O(1326x1326) NumPy comparison, which replaces the previous O(1326 * 990 *
 21) per-combo enumeration in ``made_strength_percentile``.
 
-:func:`rollout_equity_index_table` (Method E) reuses the same machinery
-to compute the expected made percentile across all future runouts
-(exact on the turn, exact-or-Monte-Carlo on the flop).
+
+Honestly, Alex, if you see this, this file is a bit of a mess.
+I used AI extensively to generate this file because I wanted to get the
+speedup from vectorization and didn't know how to implement this fast poker
+evaluator from scratch. 
 """
 
 from __future__ import annotations
@@ -37,11 +39,11 @@ _SUIT_TO_IDX = {c: i for i, c in enumerate(_SUIT_CHARS_UPPER)}
 
 def card_to_index(card: Card) -> int:
     """``rank_idx * 4 + suit_idx`` packing (rank_idx 0..12, suit_idx 0..3)."""
-    return (RANK_TO_VALUE[card.rank] - 2) * 4 + _SUIT_TO_IDX[card.suit]
+    return (RANK_TO_VALUE[card.rank] - 2) * 4 + _SUIT_TO_IDX[card.suit]  # 0..51
 
 
 def index_to_card(idx: int) -> Card:
-    return Card(_RANK_CHARS[idx >> 2], _SUIT_CHARS_UPPER[idx & 3])
+    return Card(_RANK_CHARS[idx >> 2], _SUIT_CHARS_UPPER[idx & 3])  # unpack rank/suit
 
 
 def parse_board_indices(board: str) -> Tuple[int, ...]:
@@ -58,7 +60,7 @@ def parse_board_indices(board: str) -> Tuple[int, ...]:
         suit = tok[1].upper()
         if rank not in RANK_TO_VALUE or suit not in _SUIT_TO_IDX:
             raise ValueError(f"Invalid card token {tok!r} in board {board!r}")
-        out.append((RANK_TO_VALUE[rank] - 2) * 4 + _SUIT_TO_IDX[suit])
+        out.append((RANK_TO_VALUE[rank] - 2) * 4 + _SUIT_TO_IDX[suit])  # packed idx
     if len(set(out)) != len(out):
         raise ValueError(f"Duplicate cards in board {board!r}")
     return tuple(out)
@@ -72,12 +74,12 @@ def combo_key_from_indices(a_idx: int, b_idx: int) -> str:
     """
     a_rank, a_suit = a_idx >> 2, a_idx & 3
     b_rank, b_suit = b_idx >> 2, b_idx & 3
-    key_a = (-a_rank, _SUIT_CHAR_ASCII[a_suit])
+    key_a = (-a_rank, _SUIT_CHAR_ASCII[a_suit])  # higher rank first; suit tiebreak
     key_b = (-b_rank, _SUIT_CHAR_ASCII[b_suit])
     if key_a <= key_b:
         first, second = a_idx, b_idx
     else:
-        first, second = b_idx, a_idx
+        first, second = b_idx, a_idx             # swap so first is "larger" key
     fr, fs = first >> 2, first & 3
     sr, ss = second >> 2, second & 3
     return (
@@ -105,17 +107,17 @@ _TB_SHIFTS = (16, 12, 8, 4, 0)
 
 def _highest_straight(rank_mask: int) -> int:
     for m, hi in _STRAIGHT_MASKS:
-        if (rank_mask & m) == m:
+        if (rank_mask & m) == m:  # five consecutive bits set
             return hi
     if (rank_mask & _WHEEL_MASK) == _WHEEL_MASK:
-        return 3
+        return 3                  # wheel top is rank index of 5
     return -1
 
 
 def _pack(category: int, tiebreaks: Iterable[int]) -> int:
     v = category << _CAT_SHIFT
     for shift, tb in zip(_TB_SHIFTS, tiebreaks):
-        v |= (int(tb) & 0xF) << shift
+        v |= (int(tb) & 0xF) << shift  # nibble tiebreak slots
     return v
 
 
@@ -145,7 +147,7 @@ def rank_hand(cards: Iterable[int]) -> int:
         s = c & 3
         rank_count[r] += 1
         suit_count[s] += 1
-        suit_rank_mask[s] |= (1 << r)
+        suit_rank_mask[s] |= (1 << r)                           # bit per rank in this suit
 
     rank_mask = 0
     for r in range(13):
@@ -154,7 +156,7 @@ def rank_hand(cards: Iterable[int]) -> int:
 
     flush_suit = -1
     for s in range(4):
-        if suit_count[s] >= 5:
+        if suit_count[s] >= 5:                                  # need 5 for a flush in 7-card eval
             flush_suit = s
             break
 
@@ -186,7 +188,7 @@ def rank_hand(cards: Iterable[int]) -> int:
         if pairs:
             return _pack(CAT_FULL_HOUSE, (trips[0], pairs[0]))
         if len(trips) >= 2:
-            return _pack(CAT_FULL_HOUSE, (trips[0], trips[1]))
+            return _pack(CAT_FULL_HOUSE, (trips[0], trips[1]))  # two sets on board case
 
     if flush_suit >= 0:
         srm = suit_rank_mask[flush_suit]
@@ -234,12 +236,12 @@ def rank_hand(cards: Iterable[int]) -> int:
             top.append(r)
             if len(top) == 5:
                 break
-    return _pack(CAT_HIGH_CARD, top)
+    return _pack(CAT_HIGH_CARD, top)                            # five kicker ranks, high to low
 
 
 def hand_category(cards: Iterable[int]) -> int:
     """Return only the hand-category index 0..8 of the best 5-of-N hand."""
-    return rank_hand(cards) >> _CAT_SHIFT
+    return rank_hand(cards) >> _CAT_SHIFT  # strip tiebreak nibbles
 
 
 # ---------------------------------------------------------------------------
@@ -269,27 +271,27 @@ def _rank_batch(hands: np.ndarray) -> np.ndarray:
     N, n = hands.shape
     if not (5 <= n <= 7):
         raise ValueError(f"_rank_batch supports 5..7 cards, got {n}")
-    rank = hands >> 2  # (N, n)
+    rank = hands >> 2                                                             # (N, n)
     suit = hands & 3
 
     # (N, 13) counts per rank
     rank_eq = (rank[:, :, None] == np.arange(13)[None, None, :])
-    rank_count = rank_eq.sum(axis=1, dtype=np.int32)
+    rank_count = rank_eq.sum(axis=1, dtype=np.int32)                              # (N, 13)
     rank_present = rank_count > 0
-    rank_mask = (rank_present.astype(np.int64) * _RANK_POW[None, :]).sum(axis=1)
+    rank_mask = (rank_present.astype(np.int64) * _RANK_POW[None, :]).sum(axis=1)  # bitset per row
 
     # (N, 4) counts per suit + suit-rank bitmasks
     suit_eq = (suit[:, :, None] == np.arange(4)[None, None, :])
     suit_count = suit_eq.sum(axis=1, dtype=np.int32)
     # For each suit, mask of which ranks appear: any over the card axis
     # of (rank_eq & suit_eq_broadcast). Shape (N, n, 13) & (N, n, 4) -> (N, n, 4, 13)
-    in_suit = suit_eq[:, :, :, None] & rank_eq[:, :, None, :]  # (N, n, 4, 13)
+    in_suit = suit_eq[:, :, :, None] & rank_eq[:, :, None, :]                     # (N, n, 4, 13)
     suit_rank_mask = (in_suit.any(axis=1).astype(np.int64) * _RANK_POW[None, None, :]).sum(axis=2)
     # ^ shape (N, 4)
 
     has_flush = (suit_count >= 5).any(axis=1)
     # flush suit per row: first suit with >=5
-    flush_suit = (suit_count >= 5).argmax(axis=1)
+    flush_suit = (suit_count >= 5).argmax(axis=1)                                 # argmax picks first True in each row
 
     # Straight detection on rank_mask: True if (rank_mask & m) == m
     sm_check = ((rank_mask[:, None] & _STRAIGHT_MASK_ARR[None, :]) == _STRAIGHT_MASK_ARR[None, :])
@@ -300,7 +302,7 @@ def _rank_batch(hands: np.ndarray) -> np.ndarray:
     wheel_match = (rank_mask & _WHEEL_MASK) == _WHEEL_MASK
     straight_top = np.where(
         (straight_top < 0) & wheel_match, np.int8(3), straight_top
-    )
+    )                                                                             # wheel overrides "no straight"
     has_straight_any = straight_top >= 0
 
     # Straight-flush check: same logic on suit_rank_mask[flush_suit]
@@ -311,13 +313,13 @@ def _rank_batch(hands: np.ndarray) -> np.ndarray:
     sf_top = np.where(sf_match_any, _STRAIGHT_HI_ARR[sf_first], np.int8(-1))
     sf_wheel = (srm_flush & _WHEEL_MASK) == _WHEEL_MASK
     sf_top = np.where((sf_top < 0) & sf_wheel, np.int8(3), sf_top)
-    is_sf = has_flush & (sf_top >= 0)
+    is_sf = has_flush & (sf_top >= 0)                                             # straight exists inside dominant flush suit
 
     # Quads: highest rank with count == 4
     quad_indicator = np.where(
         rank_count == 4, np.arange(13)[None, :], np.int32(-1)
     )
-    quad_rank = quad_indicator.max(axis=1)
+    quad_rank = quad_indicator.max(axis=1)                                        # highest quad rank per row
     has_quad = quad_rank >= 0
     # Quad kicker: highest other present rank
     kicker_mask = (rank_count >= 1) & (np.arange(13)[None, :] != quad_rank[:, None])
@@ -336,7 +338,7 @@ def _rank_batch(hands: np.ndarray) -> np.ndarray:
 
     has_trip = trip_rank >= 0
     has_pair = pair_rank >= 0
-    fh_pair = np.maximum(pair_rank, trip_rank_lo)
+    fh_pair = np.maximum(pair_rank, trip_rank_lo)                                 # trips + pair ranks for full house
     has_fh = has_trip & (fh_pair >= 0)
 
     # Top 5 ranks for high-card / flush. Vectorized by iteratively masking
@@ -353,12 +355,12 @@ def _rank_batch(hands: np.ndarray) -> np.ndarray:
             bits = (remaining[:, None] & _RANK_POW[None, :]) > 0  # (N, 13)
             any_left = bits.any(axis=1)
             # highest rank index
-            top_idx = 12 - bits[:, ::-1].argmax(axis=1)
+            top_idx = 12 - bits[:, ::-1].argmax(axis=1)           # highest set bit index
             top_idx = np.where(any_left, top_idx, -1).astype(np.int8)
             out[:, k] = top_idx
             # clear the chosen bit
             clear = np.where(top_idx >= 0, _RANK_POW[np.maximum(top_idx, 0)], 0)
-            remaining = remaining & ~clear
+            remaining = remaining & ~clear                        # peel next kicker
         return out
 
     # Flush: top-5 ranks in the flush suit
@@ -379,7 +381,7 @@ def _rank_batch(hands: np.ndarray) -> np.ndarray:
     out = _packed(
         np.zeros(N, dtype=np.int32),
         [hc_top5[:, k].astype(np.int32) for k in range(5)],
-    )
+    )                                                                             # baseline; stronger hands overwrite
 
     # Pair
     pair_kicker_mask = (rank_count >= 1) & (np.arange(13)[None, :] != pair_rank[:, None])
@@ -398,7 +400,7 @@ def _rank_batch(hands: np.ndarray) -> np.ndarray:
     out = np.where(has_pair, pair_val, out)
 
     # Two pair
-    has_two_pair = has_pair & (pair_rank_lo >= 0)
+    has_two_pair = has_pair & (pair_rank_lo >= 0)                                 # second pair exists
     tp_kicker_mask = (
         (rank_count >= 1)
         & (np.arange(13)[None, :] != pair_rank[:, None])
@@ -442,7 +444,7 @@ def _rank_batch(hands: np.ndarray) -> np.ndarray:
         np.full(N, CAT_FLUSH, dtype=np.int32),
         [flush_top5[:, k].astype(np.int32) for k in range(5)],
     )
-    out = np.where(has_flush, flush_val, out)
+    out = np.where(has_flush, flush_val, out)                                     # overwrite straight when flush wins
 
     # Full house
     fh_val = _packed(
@@ -477,15 +479,15 @@ def _build_combo_pairs() -> Tuple[np.ndarray, Tuple[str, ...]]:
     """All 1326 ``(a_idx, b_idx)`` pairs with ``a < b`` plus their canonical keys."""
     pairs = np.array(
         [(a, b) for a, b in combinations(range(52), 2)], dtype=np.int32
-    )
+    )  # C(52,2) rows, a<b
     keys = tuple(
         combo_key_from_indices(int(a), int(b)) for a, b in pairs.tolist()
-    )
+    )  # stable key order aligned with rows
     return pairs, keys
 
 
 _ALL_COMBO_PAIRS, _ALL_COMBO_KEYS = _build_combo_pairs()
-_COMBO_KEY_TO_ROW: Dict[str, int] = {k: i for i, k in enumerate(_ALL_COMBO_KEYS)}
+_COMBO_KEY_TO_ROW: Dict[str, int] = {k: i for i, k in enumerate(_ALL_COMBO_KEYS)}  # O(1) lookup
 
 
 def all_combo_pairs() -> np.ndarray:
@@ -513,7 +515,7 @@ def _live_combo_mask(board_set: frozenset) -> np.ndarray:
     pairs = _ALL_COMBO_PAIRS
     a_in = np.isin(pairs[:, 0], list(board_set))
     b_in = np.isin(pairs[:, 1], list(board_set))
-    return ~(a_in | b_in)
+    return ~(a_in | b_in)  # True = combo does not touch board cards
 
 
 @lru_cache(maxsize=8192)
@@ -537,13 +539,13 @@ def _per_board_state(board_indices: Tuple[int, ...]) -> Dict[str, np.ndarray]:
     board_set = frozenset(board_indices)
     live_mask = _live_combo_mask(board_set)
     live_rows = np.nonzero(live_mask)[0].astype(np.int32)
-    live_pairs = _ALL_COMBO_PAIRS[live_rows]  # (M, 2)
+    live_pairs = _ALL_COMBO_PAIRS[live_rows]                           # (M, 2)
 
     n_board = len(board_indices)
     M = live_pairs.shape[0]
     hands = np.empty((M, 2 + n_board), dtype=np.int32)
     hands[:, :2] = live_pairs
-    hands[:, 2:] = np.asarray(board_indices, dtype=np.int32)[None, :]
+    hands[:, 2:] = np.asarray(board_indices, dtype=np.int32)[None, :]  # broadcast board to each row
     ranks = _rank_batch(hands)
 
     # Pairwise disjoint mask: True where combos i and j share no card.
@@ -559,10 +561,10 @@ def _per_board_state(board_indices: Tuple[int, ...]) -> Dict[str, np.ndarray]:
 
     rank_col = ranks[:, None]
     rank_row = ranks[None, :]
-    weaker = ((rank_row < rank_col) & disjoint).sum(axis=1)
+    weaker = ((rank_row < rank_col) & disjoint).sum(axis=1)            # strictly weaker opponents
     tied = ((rank_row == rank_col) & disjoint).sum(axis=1)
     total = disjoint.sum(axis=1)
-    perc = (weaker + 0.5 * tied) / np.maximum(total, 1)
+    perc = (weaker + 0.5 * tied) / np.maximum(total, 1)                # midrank tie split
 
     return {
         "live_rows": live_rows,
@@ -576,11 +578,11 @@ def made_percentile_index_table(
     board_indices: Iterable[int],
 ) -> Dict[Tuple[int, int], float]:
     """Made-strength percentile for every non-blocked 2-card combo on a board."""
-    key = tuple(sorted(int(x) for x in board_indices))
+    key = tuple(sorted(int(x) for x in board_indices))                     # order-independent board key
     state = _per_board_state(key)
     pairs = state["live_pairs"]
     perc = state["percentile"]
-    return {(int(a), int(b)): float(p) for (a, b), p in zip(pairs, perc)}
+    return {(int(a), int(b)): float(p) for (a, b), p in zip(pairs, perc)}  # index pairs → percentile
 
 
 def made_percentile_array(
@@ -591,7 +593,7 @@ def made_percentile_array(
     ``live_rows[i]`` is the row in :func:`all_combo_pairs` (and
     :func:`all_combo_keys_fast`) of the ``i``\\-th live combo.
     """
-    key = tuple(sorted(int(x) for x in board_indices))
+    key = tuple(sorted(int(x) for x in board_indices))  # order-independent board key
     state = _per_board_state(key)
     return state["live_rows"], state["percentile"]
 
@@ -603,7 +605,7 @@ def made_percentile_by_combo_key(
     live_rows, perc = made_percentile_array(board_indices)
     return {
         _ALL_COMBO_KEYS[int(r)]: float(p) for r, p in zip(live_rows, perc)
-    }
+    }  # human combo_key → percentile
 
 
 def made_percentile_at_combo_key(
@@ -625,10 +627,10 @@ def made_percentile_at_combo_key(
     state = _per_board_state(board_tuple)
     live_rows = state["live_rows"]
     perc = state["percentile"]
-    idx = int(np.searchsorted(live_rows, row))
+    idx = int(np.searchsorted(live_rows, row))  # live_rows sorted → binary search
     if idx < len(live_rows) and int(live_rows[idx]) == row:
         return float(perc[idx])
-    return None
+    return None                                 # combo blocked by board
 
 
 # ---------------------------------------------------------------------------
@@ -653,17 +655,17 @@ def _rollout_equity_cached(
     if n_board == 5:
         out_arr = np.full(1326, np.nan, dtype=np.float64)
         live_rows, perc = made_percentile_array(board_tuple)
-        out_arr[live_rows] = perc
+        out_arr[live_rows] = perc                                   # river: no rollouts left
         return out_arr
     if n_board not in (3, 4):
         raise ValueError(f"Board must have 3..5 cards, got {n_board}")
 
     board_set = set(board_tuple)
-    remaining = [c for c in range(52) if c not in board_set]
+    remaining = [c for c in range(52) if c not in board_set]        # deck minus board
 
     if n_board == 4:
-        runouts: List[Tuple[int, ...]] = [(c,) for c in remaining]
-    else:  # flop
+        runouts: List[Tuple[int, ...]] = [(c,) for c in remaining]  # one river card each
+    else:                                                           # flop
         all_pairs = list(combinations(remaining, 2))
         if mc_samples > 0 and mc_samples < len(all_pairs):
             # Seed the RNG from the (sorted) board so MC samples are
@@ -680,12 +682,12 @@ def _rollout_equity_cached(
     for ro in runouts:
         full_board = tuple(sorted(board_tuple + tuple(int(c) for c in ro)))
         live_rows, perc = made_percentile_array(full_board)
-        eq_sum[live_rows] += perc
+        eq_sum[live_rows] += perc                                   # accumulate expected made percentile
         eq_count[live_rows] += 1
 
     out_arr = np.full(1326, np.nan, dtype=np.float64)
     starting_live = _live_combo_mask(frozenset(board_tuple))
-    valid = starting_live & (eq_count > 0)
+    valid = starting_live & (eq_count > 0)                          # was live at start and saw ≥1 runout
     np.divide(eq_sum, eq_count, out=out_arr, where=valid)
     out_arr[~valid] = np.nan
     return out_arr
@@ -708,7 +710,7 @@ def rollout_equity_index_table(
     runout, and the per-board equity vector is itself memoized).
     """
     board_tuple = tuple(sorted(int(x) for x in board_indices))
-    mc = 0 if mc_samples is None else int(mc_samples)
+    mc = 0 if mc_samples is None else int(mc_samples)  # None → exact runout enumeration
     eq_vec = _rollout_equity_cached(board_tuple, mc)
     pairs = _ALL_COMBO_PAIRS
     out: Dict[Tuple[int, int], float] = {}
@@ -716,7 +718,7 @@ def rollout_equity_index_table(
     rows = np.nonzero(valid)[0]
     for r in rows:
         a, b = int(pairs[r, 0]), int(pairs[r, 1])
-        out[(a, b)] = float(eq_vec[r])
+        out[(a, b)] = float(eq_vec[r])                 # sparse dict: valid rows only
     return out
 
 
@@ -727,13 +729,13 @@ def rollout_equity_by_combo_key(
 ) -> Dict[str, float]:
     """``{combo_key: rollout_equity}`` for every live combo on this board."""
     board_tuple = tuple(sorted(int(x) for x in board_indices))
-    mc = 0 if mc_samples is None else int(mc_samples)
+    mc = 0 if mc_samples is None else int(mc_samples)  # None → exact runout enumeration
     eq_vec = _rollout_equity_cached(board_tuple, mc)
     valid = ~np.isnan(eq_vec)
     rows = np.nonzero(valid)[0]
     return {
         _ALL_COMBO_KEYS[int(r)]: float(eq_vec[int(r)]) for r in rows
-    }
+    }                                                  # keys aligned to static 1326 table
 
 
 def rollout_equity_at_combo_key(
@@ -749,10 +751,10 @@ def rollout_equity_at_combo_key(
     row = _COMBO_KEY_TO_ROW.get(combo_key)
     if row is None:
         return None
-    mc = 0 if mc_samples is None else int(mc_samples)
+    mc = 0 if mc_samples is None else int(mc_samples)  # None → exact runout enumeration
     v = float(_rollout_equity_cached(board_tuple, mc)[row])
     if np.isnan(v):
-        return None
+        return None                                    # blocked combo or never sampled
     return v
 
 

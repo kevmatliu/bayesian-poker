@@ -5,6 +5,11 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Dict, Iterable, List, Tuple
 
+import numpy as np
+from pathlib import Path
+
+from pokerkit import HandHistory
+
 RANK_TO_VALUE = {
     "2": 2,
     "3": 3,
@@ -20,7 +25,7 @@ RANK_TO_VALUE = {
     "K": 13,
     "A": 14,
 }
-VALUE_TO_RANK = {v: k for k, v in RANK_TO_VALUE.items()}
+VALUE_TO_RANK = {v: k for k, v in RANK_TO_VALUE.items()}  # numeric rank -> single-letter token
 
 
 @dataclass(frozen=True)
@@ -34,10 +39,10 @@ class Card:
 
 
 def parse_card(card: str) -> Card:
-    card = card.strip().upper()
+    card = card.strip().upper()    # normalize Pluribus-style tokens
     if len(card) != 2:
         raise ValueError(f"Invalid card: {card}")
-    rank, suit = card[0], card[1]
+    rank, suit = card[0], card[1]  # e.g. Ah -> rank A, suit h (uppercased)
     if rank not in RANK_TO_VALUE:
         raise ValueError(f"Invalid rank: {rank}")
     if suit not in {"S", "H", "D", "C"}:
@@ -46,7 +51,7 @@ def parse_card(card: str) -> Card:
 
 
 def parse_cards(cards: Iterable[str]) -> List[Card]:
-    parsed = [parse_card(c) if isinstance(c, str) else c for c in cards]
+    parsed = [parse_card(c) if isinstance(c, str) else c for c in cards]  # accept str or Card
     if len(set(parsed)) != len(parsed):
         raise ValueError("Duplicate cards detected.")
     return parsed
@@ -54,19 +59,10 @@ def parse_cards(cards: Iterable[str]) -> List[Card]:
 
 def all_52_cards() -> List[Card]:
     """Full deck in deterministic order."""
-    return [Card(r, s) for s in "SHDC" for r in "23456789TJQKA"]
+    return [Card(r, s) for s in "SHDC" for r in "23456789TJQKA"]  # suits then ranks, fixed order
 
-
-import numpy as np
-from pathlib import Path
-
-from pokerkit import HandHistory
-
-from utils.strength.postflop import poker_hand_mapper
-from utils.strength.preflop import all_169_classes, get_equivalence_class
-
-_ALL_COMBOS: List[str] | None = None
-_COMBO_INDEX: Dict[str, int] | None = None
+_ALL_COMBOS: List[str] | None = None  # lazy 1,326 combo key list
+_COMBO_INDEX: Dict[str, int] | None = None  # combo string -> column index
 
 
 def _combo_catalog() -> Tuple[List[str], Dict[str, int]]:
@@ -76,7 +72,7 @@ def _combo_catalog() -> Tuple[List[str], Dict[str, int]]:
         from utils.filter.postflop import all_combo_keys
 
         _ALL_COMBOS = all_combo_keys()
-        _COMBO_INDEX = {key: i for i, key in enumerate(_ALL_COMBOS)}
+        _COMBO_INDEX = {key: i for i, key in enumerate(_ALL_COMBOS)}  # stable global combo order
     return _ALL_COMBOS, _COMBO_INDEX
 
 
@@ -92,14 +88,14 @@ class State:
         pot_size,
         hand_strength_map,
     ):
-        self.player_order = player_order
-        self.community_cards = community_cards
-        self.betting_history = betting_history
-        self.player_to_act = player_to_act
-        self.players_in_hand = players_in_hand
-        self.current_stacks = current_stacks
+        self.player_order = player_order            # clockwise seat names for this hand
+        self.community_cards = community_cards      # concatenated board cards (e.g. flop+turn+river)
+        self.betting_history = betting_history      # street-local (player, label, chips) tuples
+        self.player_to_act = player_to_act          # who faces decision at this snapshot
+        self.players_in_hand = players_in_hand      # (name, still_in) pairs in seat order
+        self.current_stacks = current_stacks        # remaining stacks after prior action
         self.pot_size = pot_size
-        self.hand_strength_map = hand_strength_map
+        self.hand_strength_map = hand_strength_map  # per-player mapper output; None if unknown
 
     def __repr__(self):
         return (
@@ -114,105 +110,105 @@ class State:
         )
 
 class Hand:
-    STREETS = ['pre-flop', 'flop', 'turn', 'river']
+    STREETS = ['pre-flop', 'flop', 'turn', 'river']  # pokerkit street order for deals and action
 
     def __init__(self, hand_history):
         self.hand_history = hand_history
 
         # poker parameters
-        self._bb = hand_history.blinds_or_straddles[1]
-        self._sb = hand_history.blinds_or_straddles[0]
+        self._bb = hand_history.blinds_or_straddles[1]                           # big blind posting
+        self._sb = hand_history.blinds_or_straddles[0]                           # small blind posting
 
         # players
         self._num_players = len(hand_history.players)
-        self.player_names = list(hand_history.players)
-        self.player_order = list(self.player_names)
+        self.player_names = list(hand_history.players)                           # display order matches .phh seat list
+        self.player_order = list(self.player_names)                              # used for postflop first-to-act walk
         self.seat_to_player = {
-            f'p{i + 1}': self.player_names[i] for i in range(self._num_players)
+            f'p{i + 1}': self.player_names[i] for i in range(self._num_players)  # action tokens p1..pn
         }
         self.player_to_seat = {
-            player: seat for seat, player in self.seat_to_player.items()
+            player: seat for seat, player in self.seat_to_player.items()         # reverse map for logging
         }
 
         # hand strength maps and hole cards by player
         self.hand_strength_map = {
-            player: {} for player in self.player_names   # player --> {'bucket', 'score', 'hand_type', 'outs', 'board_texture'}
+            player: {} for player in self.player_names                           # player --> {'bucket', 'score', 'hand_type', 'outs', 'board_texture'}
         }
         self.hole_cards = {
-            player: '' for player in self.player_names   # player --> 'AhKh' format
+            player: '' for player in self.player_names                           # player --> 'AhKh' format
         }
         self.hole_cards_class = {
-            player: '' for player in self.player_names   # player --> 'AKs', 'AQo', etc. format
+            player: '' for player in self.player_names                           # player --> 'AKs', 'AQo', etc. format
         }
 
         # probability vectors
-        self.hand_range = {                                     # player1 --> player2 --> 169-dim vector of hand frequencies on player2 from player1 perspective
+        self.hand_range = {                                                      # player1 --> player2 --> 169-dim vector of hand frequencies on player2 from player1 perspective
             player_i: {
                 player_j: np.zeros(169) for player_j in self.player_names if player_j != player_i
             } for player_i in self.player_names
         }
-        self.hand_strength = {                                  # player1 --> player2 --> 7-dim vector of hand strength scores on player2 from player1 perspective
-            player_i: {                                      # buckets of nuts/near-nuts, strong made, medium made, weak made, strong draw, weak draw, air
+        self.hand_strength = {                                                   # player1 --> player2 --> 7-dim vector of hand strength scores on player2 from player1 perspective
+            player_i: {                                                          # buckets of nuts/near-nuts, strong made, medium made, weak made, strong draw, weak draw, air
                 player_j: np.zeros(7) for player_j in self.player_names if player_j != player_i
             } for player_i in self.player_names
         }
         _combos, _ = _combo_catalog()
-        self.combo_range = {                                    # player1 --> player2 --> 1326-dim vector of combo frequencies on player2 from player1 perspective
+        self.combo_range = {                                                     # player1 --> player2 --> 1326-dim vector of combo frequencies on player2 from player1 perspective
             player_i: {
                 player_j: np.zeros(len(_combos)) for player_j in self.player_names if player_j != player_i
             } for player_i in self.player_names
         }
 
         # more params
-        self.player_positions = {                               # player positions at the table 
+        self.player_positions = {                                                # player positions at the table 
             player: self._position_name(player) for player in self.player_names
         }
 
-        self.starting_stacks = {                                # player starting stacks
+        self.starting_stacks = {                                                 # player starting stacks
             self.player_names[i]: hand_history.starting_stacks[i]
             for i in range(self._num_players)
         }
 
-        self.stacks = self.starting_stacks.copy()               # player current stacks, updated after each action
+        self.stacks = self.starting_stacks.copy()                                # player current stacks, updated after each action
 
         self.states = {
             'pre-flop': [],
             'flop': [],
             'turn': [],
             'river': [],
-        }
+        }                                                                        # appended State snapshot after each deal / action
 
         self.actions = {
             'pre-flop': {},
             'flop': {},
             'turn': {},
             'river': {},
-        }
+        }                                                                        # index -> (actor, (bucket, level), amount) for EM / policy
 
         self._players_in_hand = {
             player: True for player in self.player_names
-        }
+        }                                                                        # fold clears a seat
 
-        self._street = 'pre-flop'
+        self._street = 'pre-flop'                                                # parser cursor while streaming actions
         self._community_cards = ''
         self._pot = 0
 
-        self._current_bet = 0              # current amount to call on this street
+        self._current_bet = 0                                                    # current amount to call on this street
         self._money_in_round = {
             player: 0 for player in self.player_names
-        }
-        self._betting_history_this_street = []
+        }                                                                        # chips put in on this street only (for contribution math)
+        self._betting_history_this_street = []                                   # cleared on new street
 
         self._street_action_index = {
             'pre-flop': 0,
             'flop': 0,
             'turn': 0,
             'river': 0,
-        }
+        }                                                                        # monotonic key into self.actions[street]
 
-        self._street_action_level = 0
+        self._street_action_level = 0                                            # raise depth within street (paired with bucket)
 
-        self._initialized = False
+        self._initialized = False                                                # start_hand sets up blinds + first snapshot
     
     def __repr__(self):
         return (
@@ -226,26 +222,26 @@ class Hand:
     @classmethod
     def from_hand_history(cls, hand_history):
         hand = cls(hand_history)
-        hand.parse()
+        hand.parse()  # stream all .phh actions into snapshots
         return hand
 
     @classmethod
     def from_string(cls, hand_history_text: str):
-        hand_history = HandHistory.loads(hand_history_text)
+        hand_history = HandHistory.loads(hand_history_text)  # pokerkit text format
         return cls.from_hand_history(hand_history)
 
     @classmethod
     def from_file(cls, file_path):
         with Path(file_path).expanduser().resolve().open("rb") as file_obj:
-            hand_history = HandHistory.load(file_obj)
+            hand_history = HandHistory.load(file_obj)  # binary .phh
         return cls.from_hand_history(hand_history)
 
 
     def _player_ids(self):
-        return list(self.player_names)
+        return list(self.player_names)  # stable iteration order
 
     def _player_name_from_token(self, player_token):
-        return self.seat_to_player.get(player_token, player_token)
+        return self.seat_to_player.get(player_token, player_token)  # pass through if already a name
 
     def _position_name(self, player):
         idx = self.player_names.index(player)
@@ -259,11 +255,11 @@ class Hand:
             5: ['utg', 'co', 'button'],
             6: ['utg', 'hj', 'co', 'button'],
         }
-        remaining = position_map.get(self._num_players, [])
-        return remaining[idx - 2] if idx - 2 < len(remaining) else f'seat_{idx + 1}'
+        remaining = position_map.get(self._num_players, [])                           # str for 3-max, list for larger
+        return remaining[idx - 2] if idx - 2 < len(remaining) else f'seat_{idx + 1}'  # idx 0/1 are SB/BB
 
     def _players_in_hand_list(self):
-        return [(p, self._players_in_hand[p]) for p in self._player_ids()]
+        return [(p, self._players_in_hand[p]) for p in self._player_ids()]  # State.players_in_hand shape
 
     def set_hand_range_vector(self, observer: str, target: str, class_distribution: dict[str, float]) -> np.ndarray:
         if observer == target:
@@ -273,11 +269,13 @@ class Hand:
         if target not in self.hand_range[observer]:
             raise KeyError(f"Unknown target {target!r} for observer {observer!r}.")
 
+        from utils.strength.preflop import all_169_classes
+
         classes = all_169_classes()
-        vector = np.array([class_distribution.get(hand_class, 0.0) for hand_class in classes], dtype=float)
+        vector = np.array([class_distribution.get(hand_class, 0.0) for hand_class in classes], dtype=float)  # fixed 169 order
         total = vector.sum()
         if total > 0:
-            vector = vector / total
+            vector = vector / total                                                                          # L1-normalize to a proper distribution
         self.hand_range[observer][target] = vector
         return vector
 
@@ -297,33 +295,33 @@ class Hand:
         for combo, prob in combo_distribution.items():
             idx = combo_index.get(combo)
             if idx is None:
-                continue
+                continue             # ignore keys not in the canonical 1,326 set
             vector[idx] = float(prob)
         total = vector.sum()
         if total > 0:
-            vector = vector / total
+            vector = vector / total  # L1-normalize
         self.combo_range[observer][target] = vector
         return vector
 
     def next_player(self, curr_player):
         idx = self.player_names.index(curr_player)
         for i in range(1, self._num_players + 1):
-            next_idx = (idx + i) % self._num_players
+            next_idx = (idx + i) % self._num_players  # clockwise from curr
             p = self.player_names[next_idx]
             if self._players_in_hand[p]:
                 return p
-        return None
+        return None                                   # everyone folded (should not happen mid-parse)
 
     def _first_to_act_preflop(self):
         # Assumes seat order is SB, BB, then clockwise.
         if self._num_players == 2:
-            return self.player_names[0]
-        return self.player_names[2]
+            return self.player_names[0]  # HU: SB acts first pre
+        return self.player_names[2]      # 3+: UTG is index 2 after SB, BB
 
     def _first_to_act_postflop(self):
         for p in self._player_ids():
             if self._players_in_hand[p]:
-                return p
+                return p  # first surviving seat in list order (SB-first list)
         return None
 
     def _active_hand_strength_map(self):
@@ -333,16 +331,18 @@ class Hand:
         """
         active_strengths = {}
 
+        from utils.strength.postflop import poker_hand_mapper
+
         for p in self._player_ids():
             if not self._players_in_hand[p]:
                 continue
 
             hole = self.hole_cards[p]
             if not hole or not self._community_cards:
-                active_strengths[p] = None
+                active_strengths[p] = None                                        # preflop or board not dealt yet
                 continue
 
-            active_strengths[p] = poker_hand_mapper(hole, self._community_cards)
+            active_strengths[p] = poker_hand_mapper(hole, self._community_cards)  # bucket + texture features
 
         return active_strengths
 
@@ -355,16 +355,16 @@ class Hand:
             players_in_hand=self._players_in_hand_list(),
             current_stacks=self.stacks.copy(),
             pot_size=self._pot,
-            hand_strength_map=self._active_hand_strength_map(),
+            hand_strength_map=self._active_hand_strength_map(),  # only live players with known holes
         ))
 
     def _reset_round_state_for_new_street(self):
-        self._current_bet = 0
+        self._current_bet = 0          # new street, no facing bet yet
         self._money_in_round = {
             player: 0 for player in self.player_names
         }
         self._betting_history_this_street = []
-        self._street_action_level = 0
+        self._street_action_level = 0  # re-root raise sequence
 
     def _post_blinds(self):
         # Only once, at hand initialization
@@ -380,7 +380,7 @@ class Hand:
             self._money_in_round[bb_player] = self._bb
             self._pot += self._bb
 
-        self._current_bet = self._bb
+        self._current_bet = self._bb  # preflop open is BB size until raised
 
     def _validate_nonnegative_stack(self, player):
         if self.stacks[player] < 0:
@@ -390,7 +390,7 @@ class Hand:
 
     def _validate_stack_consistency(self):
         total_start = sum(self.starting_stacks.values())
-        total_now = sum(self.stacks.values()) + self._pot
+        total_now = sum(self.stacks.values()) + self._pot  # chips in play = stacks + pot
         if total_now != total_start:
             raise ValueError(
                 f"Chip conservation violated: "
@@ -407,42 +407,42 @@ class Hand:
         self._pot = 0
         self._players_in_hand = {
             player: True for player in self.player_names
-        }
+        }                                                               # fresh table for this .phh
 
         self._reset_round_state_for_new_street()
         self._post_blinds()
 
-        self._append_state(player_to_act=self._first_to_act_preflop())
+        self._append_state(player_to_act=self._first_to_act_preflop())  # snapshot before first voluntary action
 
     def apply_action(self, raw_action):
         if not self._initialized:
-            self.start_hand()
+            self.start_hand()                                          # lazily post blinds when first action arrives
 
         parts = raw_action.split()
 
-        if parts[0] == 'd' and parts[1] == 'dh':    # hole cards
+        if parts[0] == 'd' and parts[1] == 'dh':                       # hole cards
             player = self._player_name_from_token(parts[2])
             cards = parts[3]
-            self.hole_cards[player] = cards
+            self.hole_cards[player] = cards                            # two-card string, no spaces in token
             return
 
-        if parts[0] == 'd' and parts[1] == 'db':    # board cards
+        if parts[0] == 'd' and parts[1] == 'db':                       # board cards
             new_cards = parts[2]
 
             curr_idx = self.STREETS.index(self._street)
             if curr_idx + 1 >= len(self.STREETS):
                 raise ValueError("Too many board deals")
 
-            self._street = self.STREETS[curr_idx + 1]
-            self._community_cards += new_cards
+            self._street = self.STREETS[curr_idx + 1]                  # advance flop -> turn -> river
+            self._community_cards += new_cards                         # append new board chunk only
             self._reset_round_state_for_new_street()
 
-            self.hand_strength_map = self._active_hand_strength_map()
+            self.hand_strength_map = self._active_hand_strength_map()  # refresh made-hand features
             self._append_state(player_to_act=self._first_to_act_postflop())
 
             return
 
-        player = self._player_name_from_token(parts[0])   # player actions
+        player = self._player_name_from_token(parts[0])                # player actions
         action_type = parts[1]
 
         if not self._players_in_hand[player]:
@@ -454,8 +454,8 @@ class Hand:
             self._players_in_hand[player] = False
 
         elif action_type == 'cc':
-            amount = self._current_bet
-            contribution = amount - self._money_in_round[player]
+            amount = self._current_bet                                 # call completes to current top bet
+            contribution = amount - self._money_in_round[player]       # marginal chips from this actor
             if contribution < 0:
                 raise ValueError(
                     f"Negative call contribution for {player}: "
@@ -467,7 +467,7 @@ class Hand:
             self._validate_nonnegative_stack(player)
 
         elif action_type == 'cbr':
-            amount = int(parts[2])
+            amount = int(parts[2])                                     # new total committed on this street for actor
             contribution = amount - self._money_in_round[player]
             if contribution <= 0:
                 raise ValueError(
@@ -476,14 +476,14 @@ class Hand:
                 )
             self.stacks[player] -= contribution
             self._money_in_round[player] = amount
-            self._current_bet = amount
+            self._current_bet = amount                                 # raises reopen action to this level
             self._pot += contribution
             self._validate_nonnegative_stack(player)
 
-            self._street_action_level += 1
+            self._street_action_level += 1                             # disambiguate multiple raises same street
 
         elif action_type == 'sm':
-            return
+            return                                                     # show/muck marker; no state change here
 
         else:
             raise ValueError(f"Unknown action type: {action_type}")
@@ -505,7 +505,7 @@ class Hand:
         self.actions[self._street][t] = (player, (action_bucket, self._street_action_level), amount)
         self._street_action_index[self._street] += 1
 
-        next_to_act = self.next_player(player)
+        next_to_act = self.next_player(player)                         # who faces decision after this action
 
         self._validate_stack_consistency()
         self._append_state(player_to_act=next_to_act)
@@ -514,13 +514,13 @@ class Hand:
     def parse(self):
         self.start_hand()
         for raw_action in self.hand_history.actions:
-            self.apply_action(raw_action)
+            self.apply_action(raw_action)  # mutates streets, pot, snapshots
 
 
 class Session:
     def __init__(self, file_path):
         self.file_path = Path(file_path).expanduser().resolve()
-        self.hands = []
+        self.hands = []  # filled by parse()
 
         if not self.file_path.exists():
             raise FileNotFoundError(f"Session path does not exist: {self.file_path}")
@@ -530,7 +530,7 @@ class Session:
     @staticmethod
     def _extract_number(path: Path) -> int:
         try:
-            return int(path.stem)
+            return int(path.stem)  # numeric .phh stem for chronological sort
         except ValueError as e:
             raise ValueError(
                 f"Expected numeric filename stem, got: {path.name}"
@@ -541,7 +541,7 @@ class Session:
 
         files = sorted(
             (p for p in self.file_path.iterdir() if p.is_file() and p.suffix == '.phh'),
-            key=self._extract_number
+            key=self._extract_number  # 1.phh, 2.phh, ...
         )
 
         for path in files:
@@ -551,4 +551,4 @@ class Session:
 
 
 def parse_single_hand(hand_history_text: str) -> Hand:
-    return Hand.from_string(hand_history_text)
+    return Hand.from_string(hand_history_text)  # convenience for tests / one-off strings

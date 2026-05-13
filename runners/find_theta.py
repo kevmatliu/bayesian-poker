@@ -2,7 +2,7 @@
 """Learn per-player ``theta`` vectors (preflop + postflop) from frozen global ``beta``.
 
 Loads ``artifacts/global_priors.json`` (or any path) produced by ``train.py``,
-builds EM bundles per target player via :mod:`pipeline_common`, and runs
+builds EM bundles per target player via :mod:`runners.common`, and runs
 :func:`utils.em.preflop.run_preflop_em` plus :func:`utils.em.postflop.run_postflop_theta_em`.
 Supports bilateral ``--em-pair`` mode (each player uses only the other as observer).
 """
@@ -21,12 +21,13 @@ from typing import Any, Dict, List, Mapping, MutableMapping, Optional, Sequence,
 
 import numpy as np
 
-from pipeline_common import (
+from .common import (
     HandRef,
     dump_json,
     flatten_hands,
     gather_postflop_bundles_for_target_player,
     gather_preflop_bundles_for_target_player,
+    load_global_priors,
     load_json,
     read_session_names_file,
 )
@@ -377,19 +378,6 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p.add_argument("--log-level", default="INFO", choices=("DEBUG", "INFO", "WARNING", "ERROR"))
     return p
-
-
-def load_global_priors(path: Path) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Read ``beta_preflop``, ``beta_facing``, ``beta_no_bet`` arrays from a global priors JSON file."""
-    raw = load_json(path)
-    if not isinstance(raw, dict):
-        raise ValueError("global priors JSON must be an object")
-    pre = raw.get("preflop") or {}
-    post = raw.get("postflop") or {}
-    beta_preflop = np.asarray(pre["beta_preflop"], dtype=float)
-    beta_facing = np.asarray(post["beta_facing"], dtype=float)
-    beta_no_bet = np.asarray(post["beta_no_bet"], dtype=float)
-    return beta_preflop, beta_facing, beta_no_bet
 
 
 def discover_players(refs: Sequence) -> List[str]:
